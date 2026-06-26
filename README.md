@@ -1,10 +1,16 @@
 # casino-review 🎰
 
+The ultimate reviewer orchestrator you didn't even know you need! 
+
 Watches a GitHub repo's pull requests for a `/casino-review` comment. When it
 sees one, it posts a slot-machine GIF that lands on a randomly chosen review
 (`tsetso-review`, `dimoreview`, `gigareview`, …). The GIF stays, and after a
 wait it posts the real trigger comment (e.g. `/tsetso-review`) to kick off that
 review.
+
+<img width="400" height="300" alt="out" src="https://github.com/user-attachments/assets/0ab154db-f6d9-431f-b6c1-d57018bc5a69" />
+
+(Insert your reviewer commands here)
 
 ## Flow
 
