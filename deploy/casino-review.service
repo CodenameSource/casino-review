@@ -1,0 +1,22 @@
+[Unit]
+Description=casino-review — spins a slot machine to pick a PR review
+# Wait for the network so the first poll can reach api.github.com.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The wrapper resolves its own directory, loads .env (handling inline comments,
+# which systemd's EnvironmentFile= does not), then execs the binary.
+# Adjust the path if the checkout isn't at /root/casino-review.
+ExecStart=/root/casino-review/scripts/casino-review.sh
+WorkingDirectory=/root/casino-review
+
+# It's a long-lived poller: keep it running, relaunch on crash or network blip.
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
