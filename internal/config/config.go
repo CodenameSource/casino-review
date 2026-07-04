@@ -88,7 +88,7 @@ func Load() (*Config, error) {
 		c.AssetsOwner, c.AssetsRepo = c.Owner, c.Repo
 	}
 
-	reviews := env("REVIEWS", "tsetso-review,dimoreview,gigareview")
+	reviews := env("REVIEWS", "tsetso-review,dimoreview,gigareview,barbie-review")
 	for _, r := range strings.Split(reviews, ",") {
 		if r = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r), "/")); r != "" {
 			c.Reviews = append(c.Reviews, r)

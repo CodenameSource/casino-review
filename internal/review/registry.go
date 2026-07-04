@@ -20,6 +20,22 @@ type Spec struct {
 	Timeout    string   `json:"timeout,omitempty"`     // e.g. "10m"
 }
 
+// AnalyzerStep is one tool inside the all-in-one static addon.
+type AnalyzerStep struct {
+	Cmd     []string `json:"cmd"`
+	Parser  string   `json:"parser,omitempty"` // eslint | tsc | generic
+	Timeout string   `json:"timeout,omitempty"`
+}
+
+// AddonSpec is the bonus reviewer: it is NOT on the reel. After the reel picks
+// a winner, the addon fires with probability Chance (1.0 = permanent) and runs
+// every analyzer step over one checkout, posting one merged findings comment.
+type AddonSpec struct {
+	Name      string         `json:"name"`
+	Chance    float64        `json:"chance"` // 0..1
+	Analyzers []AnalyzerStep `json:"analyzers"`
+}
+
 // JudgeSpec is an arbitration persona (used from P4; parsed now so one file
 // carries the whole registry).
 type JudgeSpec struct {
@@ -31,6 +47,7 @@ type JudgeSpec struct {
 // Registry is the full parsed reviews file.
 type Registry struct {
 	Reviews []Spec      `json:"reviews"`
+	Addon   *AddonSpec  `json:"addon,omitempty"`
 	Judges  []JudgeSpec `json:"judges,omitempty"`
 }
 
@@ -105,6 +122,38 @@ func (r *Registry) validate(trigger string) error {
 		if s.Timeout != "" {
 			if _, err := time.ParseDuration(s.Timeout); err != nil {
 				return fmt.Errorf("review %q: invalid timeout: %w", s.Name, err)
+			}
+		}
+	}
+	if a := r.Addon; a != nil {
+		if a.Name == "" {
+			return fmt.Errorf("addon: name is required")
+		}
+		if seen[a.Name] {
+			return fmt.Errorf("addon name %q duplicates a review name", a.Name)
+		}
+		if trigger != "" && "/"+a.Name == trigger {
+			return fmt.Errorf("addon %q collides with the trigger %q", a.Name, trigger)
+		}
+		if a.Chance < 0 || a.Chance > 1 {
+			return fmt.Errorf("addon %q: chance must be within [0,1], got %v", a.Name, a.Chance)
+		}
+		if len(a.Analyzers) == 0 {
+			return fmt.Errorf("addon %q: at least one analyzer step is required", a.Name)
+		}
+		for i, st := range a.Analyzers {
+			if len(st.Cmd) == 0 {
+				return fmt.Errorf("addon %q analyzers[%d]: cmd is required", a.Name, i)
+			}
+			switch st.Parser {
+			case "", "generic", "eslint", "tsc":
+			default:
+				return fmt.Errorf("addon %q analyzers[%d]: unknown parser %q", a.Name, i, st.Parser)
+			}
+			if st.Timeout != "" {
+				if _, err := time.ParseDuration(st.Timeout); err != nil {
+					return fmt.Errorf("addon %q analyzers[%d]: invalid timeout: %w", a.Name, i, err)
+				}
 			}
 		}
 	}

@@ -38,14 +38,16 @@ func (s *Store) InsertReviewRun(ctx context.Context, r ReviewRun) (int64, error)
 	return id, err
 }
 
-// LastReviewRun returns the most recent finished run for a repo (any PR),
-// which feeds the selector's PreviousHadFindings signal. Returns nil if none.
+// LastReviewRun returns the most recent finished REEL run for a repo (any PR),
+// which feeds the selector's PreviousHadFindings signal. Addon (bonus) runs are
+// excluded: they aren't reel assignments, and letting them shadow the previous
+// reel engine would corrupt the milestone-2 weighting signal.
 func (s *Store) LastReviewRun(ctx context.Context, repo string) (*ReviewRun, error) {
 	var r ReviewRun
 	var findingsCount *int
 	err := s.Pool.QueryRow(ctx,
 		`SELECT id, repo, pr, engine, engine_kind, findings_count, COALESCE(summary,''), COALESCE(error,''), started_at
-		 FROM review_runs WHERE repo=$1 AND finished_at IS NOT NULL
+		 FROM review_runs WHERE repo=$1 AND finished_at IS NOT NULL AND engine_kind <> 'addon'
 		 ORDER BY started_at DESC LIMIT 1`, repo).
 		Scan(&r.ID, &r.Repo, &r.PR, &r.Engine, &r.EngineKind, &findingsCount, &r.Summary, &r.Error, &r.StartedAt)
 	if err == pgx.ErrNoRows {

@@ -60,17 +60,25 @@ func main() {
 		ghAssets = github.New(cfg.Token, cfg.AssetsOwner, cfg.AssetsRepo)
 	}
 
-	engines, err := review.BuildAll(registry, review.Deps{
+	deps := review.Deps{
 		GH: gh, Token: cfg.Token,
 		Checkouts: review.NewCheckouts(cfg.Workdir, cfg.Token),
 		ClaudeBin: cfg.ClaudeBin,
-	})
+	}
+	engines, err := review.BuildAll(registry, deps)
 	if err != nil {
 		log.Fatalf("build engines: %v", err)
 	}
+	addon, err := review.BuildAddon(registry.Addon, deps)
+	if err != nil {
+		log.Fatalf("build addon: %v", err)
+	}
+	if addon != nil {
+		log.Printf("bonus addon %q armed at %.0f%% chance", addon.Engine.Name(), addon.Chance*100)
+	}
 
 	spinner := &spin.Spinner{GH: gh, Assets: ghAssets, Branch: cfg.AssetsBranch}
-	w := worker.New(cfg, st, tel, gh, spinner, engines, registry.Names(), selector.Random{})
+	w := worker.New(cfg, st, tel, gh, spinner, engines, registry.Names(), selector.Random{}, addon)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return w.Run(ctx) })

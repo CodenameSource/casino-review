@@ -72,6 +72,21 @@ Claude engines run with read-only tools (`Read,Grep,Glob,Bash(git diff/log/show)
 a turn cap, and a timeout; they must answer in strict JSON or the run errors —
 the bot never fabricates findings.
 
+### The bonus round (static addon)
+
+The all-in-one static reviewer is **not on the reel** — it's an addon that
+fires with probability `addon.chance` after the winner is chosen (`1.0` =
+permanent). All its analyzer steps (eslint, tsc, …) run over one checkout and
+post **one merged comment**; a broken step degrades to a finding instead of
+sinking the pass. When the roll hits, the GIF plays a **bonus round**: the
+winner reveal finishes as usual, then the machine lights up again — flashing
+pink `* BONUS: STATIC *` banner, sparkle burst, steady dual-banner hold. The
+roll happens before the GIF renders (animation always matches reality) and is
+revealed only *after* the winner, so there's no early tell. For the experiment,
+`spin.assigned` logs `addon_chance` + `addon_hit` (Bernoulli assignment with
+propensity), and addon runs are excluded from the selector's signal.
+Preview: `go run ./cmd/casino gen out.gif --bonus static`.
+
 ## Telemetry — the experiment
 
 Three planes, each doing what it's best at:

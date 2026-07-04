@@ -69,7 +69,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  casino gen [out.gif]
+  casino gen [out.gif] [--bonus <label>]
   casino check
   casino cleanup
   casino db migrate
@@ -112,25 +112,36 @@ func runReview(cfg *config.Config, args []string) {
 	if err != nil {
 		log.Fatalf("registry: %v", err)
 	}
-	var spec *review.Spec
-	for i := range registry.Reviews {
-		if registry.Reviews[i].Name == engineName {
-			spec = &registry.Reviews[i]
-		}
-	}
-	if spec == nil {
-		log.Fatalf("engine %q not in registry (have: %s)", engineName, strings.Join(registry.Names(), ", "))
-	}
-
 	gh := github.New(cfg.Token, cfg.Owner, cfg.Repo)
-	engine, err := review.Build(*spec, review.Deps{
+	deps := review.Deps{
 		GH: gh, Token: cfg.Token,
 		Checkouts: review.NewCheckouts(cfg.Workdir, cfg.Token),
 		ClaudeBin: cfg.ClaudeBin,
 		DryRun:    !*post,
-	})
-	if err != nil {
-		log.Fatalf("build engine: %v", err)
+	}
+
+	var engine review.Engine
+	for i := range registry.Reviews {
+		if registry.Reviews[i].Name == engineName {
+			engine, err = review.Build(registry.Reviews[i], deps)
+			if err != nil {
+				log.Fatalf("build engine: %v", err)
+			}
+		}
+	}
+	if engine == nil && registry.Addon != nil && registry.Addon.Name == engineName {
+		addon, err := review.BuildAddon(registry.Addon, deps)
+		if err != nil {
+			log.Fatalf("build addon: %v", err)
+		}
+		engine = addon.Engine
+	}
+	if engine == nil {
+		have := strings.Join(registry.Names(), ", ")
+		if registry.Addon != nil {
+			have += ", " + registry.Addon.Name + " (addon)"
+		}
+		log.Fatalf("engine %q not in registry (have: %s)", engineName, have)
 	}
 
 	log.Printf("running %s (%s) on %s#%d (post=%v)", engine.Name(), engine.Kind(), cfg.RepoSlug(), *pr, *post)
@@ -153,10 +164,20 @@ func runReview(cfg *config.Config, args []string) {
 
 func genSample(args []string) {
 	out := "casino-sample.gif"
-	if len(args) > 0 {
-		out = args[0]
+	bonus := ""
+	rest := args[:0:0]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--bonus" && i+1 < len(args) {
+			bonus = args[i+1]
+			i++
+			continue
+		}
+		rest = append(rest, args[i])
 	}
-	reviews := []string{"tsetso-review", "dimoreview", "gigareview"}
+	if len(rest) > 0 {
+		out = rest[0]
+	}
+	reviews := []string{"tsetso-review", "dimoreview", "gigareview", "barbie-review"}
 	if env := os.Getenv("REVIEWS"); env != "" {
 		reviews = nil
 		for _, r := range strings.Split(env, ",") {
@@ -172,14 +193,18 @@ func genSample(args []string) {
 	if idx < 0 {
 		idx += len(reviews)
 	}
-	data, err := slots.Generate(reviews, idx, time.Now().UnixNano())
+	var opts []slots.Option
+	if bonus != "" {
+		opts = append(opts, slots.WithBonus(bonus))
+	}
+	data, err := slots.Generate(reviews, idx, time.Now().UnixNano(), opts...)
 	if err != nil {
 		log.Fatalf("generate: %v", err)
 	}
 	if err := os.WriteFile(out, data, 0o644); err != nil {
 		log.Fatalf("write: %v", err)
 	}
-	log.Printf("wrote %s (%d bytes), winner=%q", out, len(data), reviews[idx])
+	log.Printf("wrote %s (%d bytes), winner=%q bonus=%q", out, len(data), reviews[idx], bonus)
 }
 
 // runCheck is a read-only dry test of the monitor's read path.

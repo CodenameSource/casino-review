@@ -32,6 +32,41 @@ func TestPlanStepsExactAndMonotonic(t *testing.T) {
 	}
 }
 
+// The bonus round appends frames strictly AFTER the winner's reveal + hold —
+// a bonus GIF must share its entire prefix with the plain GIF of the same seed
+// (no early tell), be longer, and still satisfy the no-duplicate invariant.
+func TestGifBonusRound(t *testing.T) {
+	reviews := []string{"tsetso-review", "dimoreview", "gigareview", "barbie-review"}
+	for seed := int64(0); seed < 6; seed++ {
+		plain, err := Generate(reviews, 1, seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bonus, err := Generate(reviews, 1, seed, WithBonus("static"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gp, _ := gif.DecodeAll(bytes.NewReader(plain))
+		gb, _ := gif.DecodeAll(bytes.NewReader(bonus))
+		if len(gb.Image) <= len(gp.Image) {
+			t.Fatalf("seed %d: bonus GIF (%d frames) not longer than plain (%d)", seed, len(gb.Image), len(gp.Image))
+		}
+		// Identical prefix up to the shared hold frame — the bonus reveal must
+		// not alter anything earlier (no early tell).
+		for i := 0; i < len(gp.Image)-5; i++ { // -5: fade-out frames differ (bonus banner persists)
+			if !bytes.Equal(gp.Image[i].Pix, gb.Image[i].Pix) {
+				t.Fatalf("seed %d: frame %d differs before the bonus segment", seed, i)
+			}
+		}
+		// No frozen frames in the bonus segment either.
+		for i := 1; i < len(gb.Image); i++ {
+			if bytes.Equal(gb.Image[i-1].Pix, gb.Image[i].Pix) {
+				t.Fatalf("seed %d: bonus frames %d,%d identical", seed, i-1, i)
+			}
+		}
+	}
+}
+
 // Decode the produced GIF and assert the visible-behaviour invariants:
 //   - no two consecutive frames are pixel-identical (a frozen frame == stutter);
 //   - the winning gold/white reveal colours never appear before the reveal

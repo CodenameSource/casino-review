@@ -62,6 +62,37 @@ func TestLoadRegistryRejectsBadSpecs(t *testing.T) {
 	}
 }
 
+func TestLoadRegistryAddon(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.json")
+	os.WriteFile(good, []byte(`{
+	  "reviews":[{"name":"a","engine":"dispatch"}],
+	  "addon":{"name":"static","chance":0.25,"analyzers":[
+	    {"cmd":["npx","eslint",".","--format","json"],"parser":"eslint"},
+	    {"cmd":["npx","tsc","--noEmit"],"parser":"tsc","timeout":"2m"}]}
+	}`), 0o644)
+	r, err := LoadRegistry(good, nil, "/casino-review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Addon == nil || r.Addon.Chance != 0.25 || len(r.Addon.Analyzers) != 2 {
+		t.Fatalf("addon = %+v", r.Addon)
+	}
+
+	for name, content := range map[string]string{
+		"bad-chance":   `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"s","chance":1.5,"analyzers":[{"cmd":["x"]}]}}`,
+		"no-steps":     `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"s","chance":0.5,"analyzers":[]}}`,
+		"dup-name":     `{"reviews":[{"name":"s","engine":"dispatch"}],"addon":{"name":"s","chance":0.5,"analyzers":[{"cmd":["x"]}]}}`,
+		"trigger-name": `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"casino-review","chance":0.5,"analyzers":[{"cmd":["x"]}]}}`,
+	} {
+		p := filepath.Join(dir, name+".json")
+		os.WriteFile(p, []byte(content), 0o644)
+		if _, err := LoadRegistry(p, nil, "/casino-review"); err == nil {
+			t.Errorf("%s: expected error, got none", name)
+		}
+	}
+}
+
 // A dispatch engine named after the bot's own trigger would post a comment
 // that re-triggers the bot forever — the registry must refuse it, on both the
 // file path and the legacy REVIEWS fallback.

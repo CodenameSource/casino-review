@@ -38,8 +38,14 @@ type Spinner struct {
 
 // Spin renders a reel over entries landing on chosen, hosts the GIF, and posts
 // it as a comment on the PR. uniq disambiguates the asset filename (job ID).
-func (s *Spinner) Spin(prNumber int, entries []string, chosen int, uniq int64) (gifURL string, commentID int64, err error) {
-	gif, err := slots.Generate(entries, chosen, RandSeed())
+// bonusLabel != "" appends the bonus round (the addon roll hit) — the roll
+// happens before rendering so the animation always matches what actually runs.
+func (s *Spinner) Spin(prNumber int, entries []string, chosen int, uniq int64, bonusLabel string) (gifURL string, commentID int64, err error) {
+	var opts []slots.Option
+	if bonusLabel != "" {
+		opts = append(opts, slots.WithBonus(bonusLabel))
+	}
+	gif, err := slots.Generate(entries, chosen, RandSeed(), opts...)
 	if err != nil {
 		return "", 0, fmt.Errorf("generate gif: %w", err)
 	}

@@ -37,11 +37,12 @@ type Worker struct {
 	engines map[string]review.Engine
 	names   []string // registry order = slot entries
 	sel     selector.Selector
+	addon   *review.Addon // bonus reviewer; nil = no addon configured
 }
 
 func New(cfg *config.Config, st *store.Store, tel *telemetry.T, gh *github.Client, spinner *spin.Spinner,
-	engines map[string]review.Engine, names []string, sel selector.Selector) *Worker {
-	return &Worker{cfg: cfg, st: st, tel: tel, gh: gh, spinner: spinner, engines: engines, names: names, sel: sel}
+	engines map[string]review.Engine, names []string, sel selector.Selector, addon *review.Addon) *Worker {
+	return &Worker{cfg: cfg, st: st, tel: tel, gh: gh, spinner: spinner, engines: engines, names: names, sel: sel, addon: addon}
 }
 
 // Run claims and executes jobs until ctx is cancelled.
@@ -131,6 +132,20 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 	chosen := w.sel.Choose(selCtx, r)
 	engine := w.engines[w.names[chosen]]
 
+	// The bonus (addon) roll is a Bernoulli assignment: rolled BEFORE the GIF
+	// renders (so the animation matches reality) and logged with its chance
+	// (the propensity — without it the bonus arm isn't analyzable).
+	bonusLabel := ""
+	var bonusChance float64
+	bonusHit := false
+	if w.addon != nil {
+		bonusChance = w.addon.Chance
+		bonusHit = r.Float64() < w.addon.Chance
+		if bonusHit {
+			bonusLabel = w.addon.Engine.Name()
+		}
+	}
+
 	// Record the assignment BEFORE the outcome exists — RCT hygiene.
 	if err := telemetry.Emit(ctx, w.st.Pool, telemetry.Event{
 		Type: "spin.assigned", Actor: sj.Actor, ContextRef: ctxRef,
@@ -138,16 +153,17 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 			"job_id": job.ID, "pool": w.names, "chosen": engine.Name(),
 			"chosen_index": chosen, "selector": w.sel.Name(),
 			"prev_index": selCtx.PreviousIndex, "prev_had_findings": selCtx.PreviousHadFindings,
+			"addon": addonName(w.addon), "addon_chance": bonusChance, "addon_hit": bonusHit,
 		},
 	}); err != nil {
 		log.Printf("emit spin.assigned: %v", err)
 	}
 
-	gifURL, _, err := w.spinner.Spin(sj.PR, w.names, chosen, job.ID)
+	gifURL, _, err := w.spinner.Spin(sj.PR, w.names, chosen, job.ID, bonusLabel)
 	if err != nil {
 		return err
 	}
-	log.Printf("PR #%d: reel landed on %q (gif %s)", sj.PR, engine.Name(), gifURL)
+	log.Printf("PR #%d: reel landed on %q (bonus=%v, gif %s)", sj.PR, engine.Name(), bonusHit, gifURL)
 
 	// Let the spin play out before the review reveals the winner's work.
 	select {
@@ -156,6 +172,23 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 	case <-time.After(w.cfg.DisplayFor):
 	}
 
+	runErr := w.runEngine(ctx, job, sj, ctxRef, engine)
+
+	// The bonus round: the addon runs regardless of the main engine's outcome
+	// (the GIF promised it), but never on shutdown — the requeued retry
+	// replays the whole job. The job's success is the MAIN engine's success;
+	// an addon failure is recorded but doesn't fail or retry the job.
+	if bonusHit && ctx.Err() == nil {
+		if aerr := w.runEngine(ctx, job, sj, ctxRef, w.addon.Engine); aerr != nil {
+			log.Printf("PR #%d: bonus addon failed: %v", sj.PR, aerr)
+		}
+	}
+	return runErr
+}
+
+// runEngine executes one engine and records the outcome — the review_runs row,
+// prometheus, the events spine, PostHog, and a PR error comment on failure.
+func (w *Worker) runEngine(ctx context.Context, job *store.Job, sj monitor.SpinJob, ctxRef string, engine review.Engine) error {
 	runStart := time.Now()
 	res, runErr := engine.Run(ctx, review.PR{Owner: sj.Owner, Repo: sj.Repo, Number: sj.PR})
 
@@ -164,7 +197,7 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 	bg := context.WithoutCancel(ctx)
 
 	run := store.ReviewRun{
-		Repo: repoSlug, PR: sj.PR, Engine: engine.Name(), EngineKind: engine.Kind(),
+		Repo: sj.Owner + "/" + sj.Repo, PR: sj.PR, Engine: engine.Name(), EngineKind: engine.Kind(),
 		JobID: job.ID, Summary: res.Summary, CommentID: res.CommentID,
 		StartedAt: runStart, FinishedAt: time.Now(),
 	}
@@ -220,4 +253,11 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 	}
 	log.Printf("PR #%d: %s completed (%d findings)", sj.PR, engine.Name(), len(res.Findings))
 	return nil
+}
+
+func addonName(a *review.Addon) string {
+	if a == nil {
+		return ""
+	}
+	return a.Engine.Name()
 }

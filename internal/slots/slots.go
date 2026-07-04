@@ -71,17 +71,36 @@ type frame struct {
 	border      color.Color // non-nil draws a pulsing outline around the band
 	borderThick int         // outline thickness in px
 	banner      bool        // draw the WINNER banner across the top
+	bonus       int         // bonus-round banner across the bottom: 0 off, 1 pink, 2 white flash
 	fade        float64     // 0 = full colour, 1 = faded to background (loop seam)
+}
+
+// Option customises a Generate call.
+type Option func(*genConfig)
+
+type genConfig struct {
+	bonusLabel string
+}
+
+// WithBonus appends the bonus round: after the winner's reveal and hold, the
+// machine lights up again — a flashing "* BONUS: <LABEL> *" banner at the
+// bottom, then a steady dual-banner hold before the fade. The bonus is only
+// ever revealed AFTER the winner (no early tell), and a GIF without the option
+// is bit-identical to before.
+func WithBonus(label string) Option {
+	return func(c *genConfig) { c.bonusLabel = label }
 }
 
 // builder accumulates frames + delays and shares the palette-mapping memo.
 type builder struct {
-	white  []*image.RGBA // one cached text image per review (plain)
-	gold   *image.RGBA   // the winner's name in gold
-	banner *image.RGBA   // "* WINNER *"
-	strip  []int         // review index shown at each reel position
-	csi    int           // strip index of the winner
-	memo   map[color.RGBA]uint8
+	white      []*image.RGBA // one cached text image per review (plain)
+	gold       *image.RGBA   // the winner's name in gold
+	banner     *image.RGBA   // "* WINNER *"
+	bonusPink  *image.RGBA   // "* BONUS: X *" in hot pink
+	bonusWhite *image.RGBA   // ^ in white, for the flash alternation
+	strip      []int         // review index shown at each reel position
+	csi        int           // strip index of the winner
+	memo       map[color.RGBA]uint8
 
 	frames []*image.Paletted
 	delays []int
@@ -94,7 +113,11 @@ func (b *builder) add(f frame, delayCs int) {
 
 // Generate produces the animated GIF. chosenIdx is the selector's winner and is
 // always the final landing; seed only varies the decoys, offsets, and timing.
-func Generate(reviews []string, chosenIdx int, seed int64) ([]byte, error) {
+func Generate(reviews []string, chosenIdx int, seed int64, opts ...Option) ([]byte, error) {
+	var cfg genConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	r := rand.New(rand.NewSource(seed))
 
 	// Randomise the spin so every pull feels different — the casino experience.
@@ -150,6 +173,11 @@ func Generate(reviews []string, chosenIdx int, seed int64) ([]byte, error) {
 		memo:   make(map[color.RGBA]uint8, 64),
 		gold:   textImage(strings.ToUpper(reviews[chosenIdx]), palette[4]),
 		banner: textImage("* WINNER *", palette[7]),
+	}
+	if cfg.bonusLabel != "" {
+		label := "* BONUS: " + strings.ToUpper(cfg.bonusLabel) + " *"
+		b.bonusPink = textImage(label, palette[8])
+		b.bonusWhite = textImage(label, palette[7])
 	}
 	for i, name := range reviews {
 		b.white[i] = textImage(strings.ToUpper(name), palette[3])
@@ -220,9 +248,27 @@ func Generate(reviews []string, chosenIdx int, seed int64) ([]byte, error) {
 	// 4. Hold on the result so it can be read.
 	b.add(frame{scroll: winScroll, band: palette[2], reveal: true, banner: true}, 300)
 
-	// 5. Fade out to black; the loop back to step 1 is a clean cross-fade.
+	// 5. The bonus round (only when the addon roll hit): the payout is done —
+	//    and then the machine lights up AGAIN. Flashing pink/white banner at the
+	//    bottom with a sparkle burst, then a steady dual-banner hold. Revealed
+	//    strictly after the winner, so there is never an early tell.
+	bonusHold := 0
+	if cfg.bonusLabel != "" {
+		for i := 0; i < 10; i++ {
+			style := 1 + i%2 // pink / white alternation
+			b.add(frame{
+				scroll: winScroll, band: palette[2], reveal: true, banner: true,
+				bonus: style, sparkleSeed: 40 + i,
+				border: palette[8], borderThick: 2 + i%3,
+			}, 9)
+		}
+		b.add(frame{scroll: winScroll, band: palette[2], reveal: true, banner: true, bonus: 1}, 280)
+		bonusHold = 1
+	}
+
+	// 6. Fade out to black; the loop back to step 1 is a clean cross-fade.
 	for i := 1; i <= 5; i++ {
-		b.add(frame{scroll: winScroll, band: palette[2], reveal: true, banner: true, fade: float64(i) / 5}, 6)
+		b.add(frame{scroll: winScroll, band: palette[2], reveal: true, banner: true, bonus: bonusHold, fade: float64(i) / 5}, 6)
 	}
 
 	g := &gif.GIF{Image: b.frames, Delay: b.delays, LoopCount: 0}
@@ -356,6 +402,17 @@ func (b *builder) render(f frame) *image.Paletted {
 		fillRect(img, 16, 4, W-16, 34, palette[9])
 		fillRect(img, 16, 2, W-16, 6, palette[4])
 		blitText(img, b.banner, W/2, 19)
+	}
+	// Bonus banner mirrors the WINNER banner at the bottom, in the bonus's
+	// hot-pink theme (white on the flash frames).
+	if f.bonus > 0 && b.bonusPink != nil {
+		fillRect(img, 16, H-34, W-16, H-4, palette[9])
+		fillRect(img, 16, H-6, W-16, H-2, palette[8])
+		txt := b.bonusPink
+		if f.bonus == 2 {
+			txt = b.bonusWhite
+		}
+		blitText(img, txt, W/2, H-19)
 	}
 	if f.fade > 0 {
 		applyFade(img, f.fade)
