@@ -1,5 +1,5 @@
 /.env
-/casino-review
-/dist/
+/reviews.json
+/work/
 /casino-sample.gif
 *.gif

@@ -1,0 +1,56 @@
+name: casino-review
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: casino
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-casino}
+      POSTGRES_DB: casino
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casino -d casino"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
+      METRICS_ADDR: ":9090"
+
+  # NOTE: keep runner at 1 replica. The checkout lock is process-local; scaled
+  # replicas sharing the /work volume would race in the same working tree.
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
+      METRICS_ADDR: ":9090"
+      WORKDIR: /work
+      REVIEWS_FILE: /config/reviews.json
+    volumes:
+      - runner-work:/work
+      # Mount your registry + personas read-only; edit on the host, restart runner.
+      - ./reviews.json:/config/reviews.json:ro
+      - ./personas:/config/personas:ro
+
+volumes:
+  pgdata:
+  runner-work:

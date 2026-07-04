@@ -121,8 +121,13 @@ func (c *Client) IsPullRequest(number int) (bool, error) {
 	return issue.PullRequest != nil, nil
 }
 
-// CreateComment posts a comment and returns its ID.
+// CreateComment posts a comment and returns its ID. The body is scrubbed of
+// the client's token as a last line of defense: comment bodies can carry
+// engine/model/subprocess output, and no path should ever publish credentials.
 func (c *Client) CreateComment(issueNumber int, body string) (int64, error) {
+	if c.token != "" {
+		body = strings.ReplaceAll(body, c.token, "***")
+	}
 	payload, _ := json.Marshal(map[string]string{"body": body})
 	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", apiBase, c.owner, c.repo, issueNumber)
 	var out Comment

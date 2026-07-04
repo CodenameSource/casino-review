@@ -1,0 +1,30 @@
+{
+  "reviews": [
+    { "name": "tsetso-review", "engine": "dispatch" },
+    { "name": "dimoreview", "engine": "dispatch" },
+    {
+      "name": "paranoid-sec",
+      "engine": "claude",
+      "prompt_file": "/config/personas/paranoid-sec.md",
+      "max_turns": 30,
+      "timeout": "10m"
+    },
+    {
+      "name": "eslint",
+      "engine": "analyzer",
+      "cmd": ["npx", "--yes", "eslint", ".", "--format", "json"],
+      "parser": "eslint",
+      "timeout": "5m"
+    },
+    {
+      "name": "tsc",
+      "engine": "analyzer",
+      "cmd": ["npx", "--yes", "tsc", "--noEmit"],
+      "parser": "tsc",
+      "timeout": "5m"
+    }
+  ],
+  "judges": [
+    { "name": "judge-dread", "prompt_file": "/config/personas/judge-dread.md" }
+  ]
+}

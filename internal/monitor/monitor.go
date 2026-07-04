@@ -1,73 +1,62 @@
-// Package monitor polls a repo's PR comments and runs the casino spin.
+// Package monitor is the trigger side of the pipeline: it polls the monitored
+// repo's PR comments, dedups (reaction + job key), and enqueues spin jobs.
+// Execution — the GIF, the engine run — happens in the runner (internal/worker).
 package monitor
 
 import (
 	"context"
-	crand "crypto/rand"
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"strconv"
 	"strings"
 	"time"
 
 	"casino-review/internal/config"
 	"casino-review/internal/github"
-	"casino-review/internal/selector"
-	"casino-review/internal/slots"
+	"casino-review/internal/spin"
+	"casino-review/internal/store"
+	"casino-review/internal/telemetry"
 )
 
 const (
-	// startupLookback is how far back the first poll looks. Because dedup is the
-	// reaction on each comment (durable, on GitHub — no local state), looking back
-	// is safe: already-handled comments carry our reaction and are skipped. This
-	// lets a restart pick up triggers posted while we were down.
+	// startupLookback bounds the first poll when no watermark is stored.
+	// Reaction dedup makes lookback safe: handled comments carry our reaction.
 	startupLookback = 24 * time.Hour
 
 	// cleanupInterval is how often we prune GIFs past the TTL.
 	cleanupInterval = 12 * time.Hour
 
-	// assetDir is the folder (on the assets branch) the GIFs live in.
-	assetDir = "casino"
+	sinceKey = "monitor.since"
 )
 
-// randSeed returns a non-reproducible seed from the OS CSPRNG, falling back to
-// the wall clock if that ever fails.
-func randSeed() int64 {
-	var b [8]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		return time.Now().UnixNano()
-	}
-	return int64(binary.LittleEndian.Uint64(b[:]))
+// SpinJob is the payload enqueued for the runner.
+type SpinJob struct {
+	Owner     string `json:"owner"`
+	Repo      string `json:"repo"`
+	PR        int    `json:"pr"`
+	CommentID int64  `json:"comment_id"`
+	Actor     string `json:"actor"` // github:<login> of the triggering comment
 }
 
 type Monitor struct {
 	cfg      *config.Config
 	gh       *github.Client // monitored repo: comments + reactions
-	ghAssets *github.Client // repo the GIF is committed to (may be the same)
-	sel      selector.Selector
+	ghAssets *github.Client // repo the GIFs are committed to (may be the same)
+	st       *store.Store
+	tel      *telemetry.T
 	self     string         // our own login, to recognise our own reaction during dedup
 	seen     map[int64]bool // per-session fast path so we don't re-query reactions every poll
-	since    time.Time      // only consider comments updated at/after this time
-	prevPick int            // last chosen review index (for milestone-2 selectors)
+	since    time.Time
 }
 
-func New(cfg *config.Config) *Monitor {
+func New(cfg *config.Config, st *store.Store, tel *telemetry.T) *Monitor {
 	gh := github.New(cfg.Token, cfg.Owner, cfg.Repo)
 	ghAssets := gh
 	if cfg.AssetsOwner != cfg.Owner || cfg.AssetsRepo != cfg.Repo {
 		ghAssets = github.New(cfg.Token, cfg.AssetsOwner, cfg.AssetsRepo)
 	}
-	return &Monitor{
-		cfg:      cfg,
-		gh:       gh,
-		ghAssets: ghAssets,
-		sel:      selector.Random{},
-		seen:     map[int64]bool{},
-		since:    time.Now().UTC().Add(-startupLookback),
-		prevPick: -1,
-	}
+	return &Monitor{cfg: cfg, gh: gh, ghAssets: ghAssets, st: st, tel: tel, seen: map[int64]bool{}}
 }
 
 // Run polls until ctx is cancelled.
@@ -78,11 +67,13 @@ func (m *Monitor) Run(ctx context.Context) error {
 		m.self = login
 		log.Printf("authenticated as %q", login)
 	}
-	log.Printf("watching %s/%s for %q comments every %s", m.cfg.Owner, m.cfg.Repo, m.cfg.Trigger, m.cfg.PollInterval)
-	if m.ghAssets == m.gh {
-		log.Printf("hosting GIFs in %s/%s — if that repo is private the embed URL expires (~5 min); set ASSETS_REPO to a public repo to keep them", m.cfg.Owner, m.cfg.Repo)
+	log.Printf("watching %s for %q comments every %s", m.cfg.RepoSlug(), m.cfg.Trigger, m.cfg.PollInterval)
+
+	// Resume from the stored watermark; fall back to the bounded lookback.
+	if ts, err := m.st.GetKVTime(ctx, sinceKey); err == nil && !ts.IsZero() {
+		m.since = ts
 	} else {
-		log.Printf("hosting GIFs in %s/%s", m.cfg.AssetsOwner, m.cfg.AssetsRepo)
+		m.since = time.Now().UTC().Add(-startupLookback)
 	}
 
 	poll := time.NewTicker(m.cfg.PollInterval)
@@ -90,8 +81,8 @@ func (m *Monitor) Run(ctx context.Context) error {
 	clean := time.NewTicker(cleanupInterval)
 	defer clean.Stop()
 
-	m.poll(ctx) // run once immediately
-	m.cleanup() // prune anything already past its TTL
+	m.poll(ctx)
+	m.cleanup()
 	for {
 		select {
 		case <-ctx.Done():
@@ -104,66 +95,13 @@ func (m *Monitor) Run(ctx context.Context) error {
 	}
 }
 
-// CleanupOnce runs a single prune pass and logs a summary — used by the
-// `cleanup` subcommand to test the prune or purge on demand (set ASSETS_TTL=0s
-// to delete everything now).
-func (m *Monitor) CleanupOnce() {
-	log.Printf("cleanup: pruning GIFs older than %s in %s/%s (%s)",
-		m.cfg.AssetsTTL, m.cfg.AssetsOwner, m.cfg.AssetsRepo, m.cfg.AssetsBranch)
-	m.cleanup()
-	log.Printf("cleanup: done")
-}
-
-// cleanup deletes committed GIFs older than the configured TTL so the assets
-// branch doesn't grow without bound. Age comes from the filename timestamp.
-func (m *Monitor) cleanup() {
-	entries, err := m.ghAssets.ListDir(m.cfg.AssetsBranch, assetDir)
-	if err != nil {
-		log.Printf("cleanup: list %s: %v", assetDir, err)
-		return
-	}
-	cutoff := time.Now().UTC().Add(-m.cfg.AssetsTTL)
-	pruned := 0
-	for _, e := range entries {
-		if e.Type != "file" {
-			continue
-		}
-		ts, ok := stampOf(e.Name)
-		if !ok || !ts.Before(cutoff) {
-			continue
-		}
-		msg := fmt.Sprintf("casino-review: prune GIF older than %s", m.cfg.AssetsTTL)
-		if err := m.ghAssets.DeleteFile(m.cfg.AssetsBranch, assetDir+"/"+e.Name, e.SHA, msg); err != nil {
-			log.Printf("cleanup: delete %s: %v", e.Name, err)
-			continue
-		}
-		pruned++
-	}
-	if pruned > 0 {
-		log.Printf("cleanup: pruned %d GIF(s) older than %s", pruned, m.cfg.AssetsTTL)
-	}
-}
-
-// stampOf reads the leading unix-seconds timestamp from "<unix>-<pr>-<id>.gif".
-func stampOf(name string) (time.Time, bool) {
-	i := strings.IndexByte(name, '-')
-	if i <= 0 {
-		return time.Time{}, false
-	}
-	sec, err := strconv.ParseInt(name[:i], 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return time.Unix(sec, 0).UTC(), true
-}
-
-// MatchesTrigger reports whether the body invokes the trigger as a command: the
-// trigger must be the first whitespace-delimited token of some line.
+// MatchesTrigger reports whether the body invokes the trigger as a command:
+// the trigger must be the first whitespace-delimited token of some line.
 //
-// This must NOT be a substring match. Our own GIF comment embeds a raw URL on the
-// "casino-review-assets" branch — a substring check finds "/casino-review" inside
-// that URL and the bot re-triggers on its own comment, looping forever. Requiring
-// the trigger to lead a line also ignores the "/<winner>" comment we post.
+// This must NOT be a substring match. Our own GIF comment embeds a raw URL on
+// the "casino-review-assets" branch — a substring check finds "/casino-review"
+// inside that URL and the bot re-triggers on its own comment, looping forever.
+// The trigger-safety test runs every bot comment template through this.
 func MatchesTrigger(body, trigger string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if f := strings.Fields(line); len(f) > 0 && f[0] == trigger {
@@ -179,40 +117,71 @@ func (m *Monitor) poll(ctx context.Context) {
 		log.Printf("list comments: %v", err)
 		return
 	}
+	telemetry.PollLag.WithLabelValues("monitor").Set(time.Since(m.since).Seconds())
+
+	// The watermark may only advance past comments that were handled (or
+	// skipped on purpose). If handling a comment fails transiently, the
+	// watermark is clamped to it so the next ListComments (inclusive `since`)
+	// re-lists it — otherwise "retry next poll" is a lie whenever a newer
+	// comment arrived in the same batch.
+	newSince := m.since
+	var retryFloor time.Time
+	failed := func(t time.Time) {
+		if retryFloor.IsZero() || t.Before(retryFloor) {
+			retryFloor = t
+		}
+	}
+
 	for _, c := range comments {
-		// Advance the watermark past everything we've looked at.
-		if c.UpdatedAt.After(m.since) {
-			m.since = c.UpdatedAt
+		if c.UpdatedAt.After(newSince) {
+			newSince = c.UpdatedAt
 		}
 		if m.seen[c.ID] {
 			continue
 		}
-		// Match the trigger as a command (first token of a line), not a substring:
-		// our own GIF comment's URL contains "casino-review-assets", which a
-		// substring check would mistake for the trigger and loop on itself. We can
-		// therefore safely act on our own account's comments too.
 		if !MatchesTrigger(c.Body, m.cfg.Trigger) {
 			continue
 		}
-		// Durable dedup: a trigger comment we've already handled carries our
-		// reaction. Check GitHub rather than a local file. On a transient error,
-		// skip this round and retry next poll (don't risk a double-spin).
+		// Durable dedup: a handled trigger comment carries our reaction. On a
+		// transient error, retry next poll rather than risk a double-spin.
 		reacted, err := m.gh.HasReaction(c.ID, m.self, m.cfg.Reaction)
 		if err != nil {
 			log.Printf("check reaction on comment %d: %v (will retry)", c.ID, err)
+			failed(c.UpdatedAt)
 			continue
 		}
-		m.seen[c.ID] = true // fast path: don't re-query this comment this session
+		m.seen[c.ID] = true
 		if reacted {
 			continue
 		}
-		if err := m.handle(ctx, c); err != nil {
-			log.Printf("handle comment %d: %v", c.ID, err)
+		if err := m.accept(ctx, c); err != nil {
+			log.Printf("accept comment %d: %v (will retry)", c.ID, err)
+			delete(m.seen, c.ID)
+			failed(c.UpdatedAt)
 		}
+	}
+	if !retryFloor.IsZero() && retryFloor.Before(newSince) {
+		newSince = retryFloor
+	}
+	m.since = newSince
+	if err := m.st.SetKVTime(ctx, sinceKey, m.since); err != nil {
+		log.Printf("persist watermark: %v", err)
+	}
+	// The seen map is a fast path, not the source of truth (reactions + job
+	// dedup keys are); cap it so a long-lived core doesn't grow unbounded.
+	if len(m.seen) > 20000 {
+		m.seen = map[int64]bool{}
 	}
 }
 
-func (m *Monitor) handle(ctx context.Context, c github.Comment) error {
+// accept validates the trigger, enqueues the spin job, then reacts.
+//
+// Ordering matters: enqueue FIRST. The job's unique dedup key makes enqueueing
+// idempotent, so a reaction failure after a successful enqueue self-heals (next
+// poll re-accepts, hits ErrDuplicateJob, retries the reaction). The reverse
+// order has an unrecoverable hole: reaction persisted + enqueue failed = the
+// comment looks handled forever and no spin ever runs.
+func (m *Monitor) accept(ctx context.Context, c github.Comment) error {
 	pr, ok := c.IssueNumber()
 	if !ok {
 		return fmt.Errorf("could not parse issue number from %q", c.IssueURL)
@@ -224,58 +193,80 @@ func (m *Monitor) handle(ctx context.Context, c github.Comment) error {
 		return nil
 	}
 
-	// Acknowledge immediately: react so the comment visibly shows it has started
-	// processing (a human-visible companion to the persisted dedup state).
+	actor := "github:" + c.User.Login
+	job := SpinJob{Owner: m.cfg.Owner, Repo: m.cfg.Repo, PR: pr, CommentID: c.ID, Actor: actor}
+	_, err := m.st.EnqueueJob(ctx, "spin", "spin:"+strconv.FormatInt(c.ID, 10), job)
+	if err != nil && !errors.Is(err, store.ErrDuplicateJob) {
+		return fmt.Errorf("enqueue: %w", err)
+	}
+	alreadyQueued := errors.Is(err, store.ErrDuplicateJob)
+
 	if err := m.gh.AddReaction(c.ID, m.cfg.Reaction); err != nil {
-		log.Printf("add reaction to comment %d: %v", c.ID, err)
+		return fmt.Errorf("add reaction: %w", err)
+	}
+	if alreadyQueued {
+		return nil // healed a previously-failed reaction; job already recorded
 	}
 
-	// Non-deterministic seed: the comment ID is public and monotonic, so seeding
-	// from it would let anyone reproduce the GIF and read the winner before the
-	// reveal. The selector's choice and the GIF's decoys both draw from this.
-	seed := randSeed()
-	r := rand.New(rand.NewSource(seed))
-	idx := m.sel.Choose(selector.Context{
-		Reviews:       m.cfg.Reviews,
-		PullRequest:   pr,
-		PreviousIndex: m.prevPick,
-	}, r)
-	m.prevPick = idx
-	winner := m.cfg.Reviews[idx]
-	log.Printf("PR #%d: spinning the casino → %q", pr, winner)
-
-	gifBytes, err := slots.Generate(m.cfg.Reviews, idx, randSeed())
-	if err != nil {
-		return fmt.Errorf("generate gif: %w", err)
+	ctxRef := fmt.Sprintf("pr:%s#%d", m.cfg.RepoSlug(), pr)
+	if err := telemetry.Emit(ctx, m.st.Pool, telemetry.Event{
+		Type: "trigger.received", Actor: actor, ContextRef: ctxRef,
+		Payload: map[string]any{"comment_id": c.ID},
+	}); err != nil {
+		log.Printf("emit trigger.received: %v", err)
 	}
-
-	// Stage the GIF on the assets repo/branch and embed it. When the assets repo is
-	// public, the returned download_url has no expiring token, so the embed lasts.
-	if err := m.ghAssets.EnsureBranch(m.cfg.AssetsBranch); err != nil {
-		return fmt.Errorf("ensure assets branch: %w", err)
-	}
-	// Timestamp-prefixed so cleanup() can prune by age from the name alone.
-	path := fmt.Sprintf("%s/%d-%d-%d.gif", assetDir, time.Now().UTC().Unix(), pr, c.ID)
-	asset, err := m.ghAssets.PutFile(m.cfg.AssetsBranch, path, gifBytes, "casino-review: spin asset")
-	if err != nil {
-		return fmt.Errorf("upload gif: %w", err)
-	}
-
-	// The comment is just the GIF, and it stays.
-	if _, err := m.gh.CreateComment(pr, fmt.Sprintf("![🎰](%s)", asset.DownloadURL)); err != nil {
-		return fmt.Errorf("post spin comment: %w", err)
-	}
-
-	// Give the spin time to play out, then trigger the real review.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(m.cfg.DisplayFor):
-	}
-
-	if _, err := m.gh.CreateComment(pr, "/"+winner); err != nil {
-		return fmt.Errorf("post review trigger: %w", err)
-	}
-	log.Printf("PR #%d: triggered /%s", pr, winner)
+	m.tel.Track(actor, "spin_triggered", map[string]any{"pr": pr, "repo": m.cfg.RepoSlug()})
+	log.Printf("PR #%d: accepted trigger from %s", pr, c.User.Login)
 	return nil
+}
+
+// cleanup deletes committed GIFs older than the configured TTL so the assets
+// branch doesn't grow without bound. Age comes from the filename timestamp.
+func (m *Monitor) cleanup() {
+	entries, err := m.ghAssets.ListDir(m.cfg.AssetsBranch, spin.AssetDir)
+	if err != nil {
+		log.Printf("cleanup: list %s: %v", spin.AssetDir, err)
+		return
+	}
+	cutoff := time.Now().UTC().Add(-m.cfg.AssetsTTL)
+	pruned := 0
+	for _, e := range entries {
+		if e.Type != "file" {
+			continue
+		}
+		ts, ok := stampOf(e.Name)
+		if !ok || !ts.Before(cutoff) {
+			continue
+		}
+		msg := fmt.Sprintf("casino-review: prune GIF older than %s", m.cfg.AssetsTTL)
+		if err := m.ghAssets.DeleteFile(m.cfg.AssetsBranch, spin.AssetDir+"/"+e.Name, e.SHA, msg); err != nil {
+			log.Printf("cleanup: delete %s: %v", e.Name, err)
+			continue
+		}
+		pruned++
+	}
+	if pruned > 0 {
+		log.Printf("cleanup: pruned %d GIF(s) older than %s", pruned, m.cfg.AssetsTTL)
+	}
+}
+
+// CleanupOnce runs a single prune pass — the `casino cleanup` subcommand.
+func (m *Monitor) CleanupOnce() {
+	log.Printf("cleanup: pruning GIFs older than %s in %s/%s (%s)",
+		m.cfg.AssetsTTL, m.cfg.AssetsOwner, m.cfg.AssetsRepo, m.cfg.AssetsBranch)
+	m.cleanup()
+	log.Printf("cleanup: done")
+}
+
+// stampOf reads the leading unix-seconds timestamp from "<unix>-<pr>-<id>.gif".
+func stampOf(name string) (time.Time, bool) {
+	i := strings.IndexByte(name, '-')
+	if i <= 0 {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(name[:i], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0).UTC(), true
 }

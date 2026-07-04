@@ -1,78 +1,53 @@
-# Deploying on a Linux VM (systemd)
+# Deploying casino-review (docker compose)
 
-`casino-review` is a long-lived poller, so run it as **one** systemd service with
-`Restart=always` — **not** a cron/timer (an interval cron would launch a new
-forever-running poller every tick and stack them).
+The stack is compose-managed: `postgres` + `core` + `runner`. No public URL is
+required (GitHub is polled; Slack — from P2 — uses Socket Mode).
 
-These steps assume the checkout lives at `~/casino-review` (i.e.
-`/root/casino-review` when you're root). If your home is elsewhere, change
-`ExecStart=`/`WorkingDirectory=` in `casino-review.service` to match.
-
-## 1. Get the binary + config in place
-
-The project dir should contain the binary as `casino-review`, your filled-in
-`.env`, and `scripts/casino-review.sh`.
+## First deploy on a VM
 
 ```bash
+git clone https://github.com/CodenameSource/casino-review.git ~/casino-review
 cd ~/casino-review
-
-# binary: either build it on the VM (needs Go)...
-CGO_ENABLED=0 go build -o casino-review .
-# ...or copy the prebuilt static one from your machine (no Go needed):
-#   scp dist/casino-review-linux-amd64  <vm>:~/casino-review/casino-review   # x86_64
-#   scp dist/casino-review-linux-arm64  <vm>:~/casino-review/casino-review   # aarch64
-
-chmod +x casino-review scripts/casino-review.sh
-chmod 600 .env          # the token lives here
-
-# dry test (the wrapper loads .env, then runs `check` — confirms it can read PRs).
-# Running ./casino-review directly would NOT see .env; the wrapper sources it.
-./scripts/casino-review.sh check
+cp .env.example .env            # fill GITHUB_TOKEN, GITHUB_REPO, ANTHROPIC_API_KEY, POSTGRES_PASSWORD
+cp reviews.example.json reviews.json   # define your engine pool; personas/ has the prompts
+docker compose up -d --build
 ```
 
-## 2. Install, enable, start
+Verify:
 
 ```bash
-sudo cp ~/casino-review/deploy/casino-review.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now casino-review
+docker compose ps                              # all services healthy/running
+docker compose logs -f core                    # "watching owner/repo for /casino-review …"
+docker compose logs -f runner                  # "runner: N engines loaded …"
+docker compose exec core casino check          # read-only GitHub smoke test
 ```
 
-## 3. Verify
+## Upgrade
 
 ```bash
-systemctl status casino-review            # active (running)
-journalctl -u casino-review -f            # live logs
-
-# expect: authenticated as "<user>" on <owner>/<repo>
-#         watching <owner>/<repo> for "/casino-review" comments every 30s
+cd ~/casino-review && git pull
+docker compose build && docker compose up -d   # migrations run automatically at core startup
 ```
 
-## Updating
+## Useful ops
 
 ```bash
-cd ~/casino-review && git pull && CGO_ENABLED=0 go build -o casino-review .
-sudo systemctl restart casino-review
-# (or scp a fresh dist/ binary over ~/casino-review/casino-review, then restart)
+docker compose exec core casino cleanup                        # prune old GIFs now
+docker compose exec runner casino review run eslint --pr 42    # dry-run an engine in the runner env
+docker compose exec postgres psql -U casino casino             # poke the DB
+docker compose exec postgres pg_dump -U casino casino > backup.sql   # backup
 ```
+
+Prometheus metrics are on `:9090/metrics` inside each service container
+(`docker compose exec core wget -qO- localhost:9090/metrics`). Point a
+prometheus at the compose network or publish the ports if you want dashboards.
 
 ## Notes
 
-- Runs as root with this unit (matching `~/casino-review` = `/root`). To run as a
-  less-privileged user instead, put the checkout in that user's home and add
-  `User=`/`Group=` to the unit.
-- The VM needs **outbound HTTPS** to `api.github.com` and `raw.githubusercontent.com`.
-- State is the GitHub reaction, so restarts/redeploys never re-trigger handled
-  comments — nothing to migrate.
-
-## Running locally on macOS instead
-
-`ai.mandel.casino-review.plist` is a launchd LaunchAgent for the same thing on a
-Mac (its paths point at this checkout — edit them if you move it). Install with:
-
-```bash
-cp deploy/ai.mandel.casino-review.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/ai.mandel.casino-review.plist   # start (and at login)
-tail -f ~/Library/Logs/casino-review.log                              # logs
-launchctl unload ~/Library/LaunchAgents/ai.mandel.casino-review.plist # stop
-```
+- The runner image bundles git, node 20 (for `npx eslint` / `npx tsc`), and the
+  claude CLI; `ANTHROPIC_API_KEY` must be present in `.env` for claude engines.
+- The old systemd/launchd deployment is retired — if you still have the
+  `casino-review` systemd unit enabled from before, `sudo systemctl disable --now
+  casino-review` before starting compose, or you'll have two bots reacting.
+- State lives in the `pgdata` volume + the GitHub reactions; containers are
+  disposable.

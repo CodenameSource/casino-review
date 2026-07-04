@@ -15,13 +15,25 @@ type Config struct {
 	AssetsOwner  string        // repo the GIF is committed to (defaults to the monitored repo)
 	AssetsRepo   string        // ^ make this a PUBLIC repo if the monitored repo is private, so the embed URL never expires
 	Trigger      string        // comment that starts a spin, e.g. "/casino-review"
-	Reviews      []string      // candidate review names WITHOUT leading slash, e.g. "tsetso-review"
+	Reviews      []string      // legacy fallback: candidate review names (all dispatch engines)
 	PollInterval time.Duration // how often to poll for new comments
-	DisplayFor   time.Duration // delay between posting the GIF and posting the "/<winner>" trigger
+	DisplayFor   time.Duration // delay between posting the GIF and running the winning review
 	AssetsBranch string        // branch the GIF is committed to so it can be embedded
 	AssetsTTL    time.Duration // prune committed GIFs older than this so they don't pile up
 	Reaction     string        // reaction marking a comment processed — also the dedup state
+
+	DatabaseURL string // Postgres; source of truth for jobs, review runs, events, markets
+	ReviewsFile string // JSON registry of typed review engines + judges; overrides Reviews
+	Workdir     string // runner scratch space for PR checkouts
+	ClaudeBin   string // claude CLI binary for LLM engines/judges
+
+	PostHogKey  string // empty = telemetry no-op
+	PostHogHost string
+	MetricsAddr string // prometheus /metrics listen address; empty = disabled
 }
+
+// RepoSlug returns "owner/repo" for the monitored repo.
+func (c *Config) RepoSlug() string { return c.Owner + "/" + c.Repo }
 
 // parseRepo accepts "owner/repo" or a full URL like
 // https://github.com/owner/repo(.git)(/) and returns owner, repo ("" on failure).
@@ -58,6 +70,13 @@ func Load() (*Config, error) {
 		Trigger:      env("TRIGGER", "/casino-review"),
 		AssetsBranch: env("ASSETS_BRANCH", "casino-review-assets"),
 		Reaction:     strings.ToLower(env("REACTION", "rocket")),
+		DatabaseURL:  env("DATABASE_URL", ""),
+		ReviewsFile:  env("REVIEWS_FILE", ""),
+		Workdir:      env("WORKDIR", "./work"),
+		ClaudeBin:    env("CLAUDE_BIN", "claude"),
+		PostHogKey:   env("POSTHOG_API_KEY", ""),
+		PostHogHost:  env("POSTHOG_HOST", "https://us.i.posthog.com"),
+		MetricsAddr:  env("METRICS_ADDR", ""),
 	}
 
 	c.Owner, c.Repo = parseRepo(env("GITHUB_REPO", ""))

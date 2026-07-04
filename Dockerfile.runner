@@ -1,0 +1,19 @@
+# runner: executes spin jobs — needs the whole toolchain: git for PR
+# checkouts, node for TS analyzers (eslint/tsc via npx), the claude CLI for
+# LLM personas.
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/runner ./cmd/runner && \
+    CGO_ENABLED=0 go build -o /out/casino ./cmd/casino
+
+FROM node:20-alpine
+RUN apk add --no-cache ca-certificates tzdata git bash ripgrep && \
+    npm install -g @anthropic-ai/claude-code && \
+    mkdir -p /work && chown node:node /work
+COPY --from=build /out/runner /out/casino /usr/local/bin/
+ENV WORKDIR=/work
+USER node
+ENTRYPOINT ["runner"]
