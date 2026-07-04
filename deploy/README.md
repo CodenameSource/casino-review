@@ -8,8 +8,8 @@ required (GitHub is polled; Slack — from P2 — uses Socket Mode).
 ```bash
 git clone https://github.com/CodenameSource/casino-review.git ~/casino-review
 cd ~/casino-review
-cp .env.example .env            # fill GITHUB_TOKEN, GITHUB_REPO, ANTHROPIC_API_KEY, POSTGRES_PASSWORD
-cp reviews.example.json reviews.json   # define your engine pool; personas/ has the prompts
+cp .env.example .env            # fill GITHUB_TOKEN, GITHUB_REPO, POSTGRES_PASSWORD
+cp reviews.example.json reviews.json   # define your engine pool + the static addon
 docker compose up -d --build
 ```
 
@@ -44,8 +44,9 @@ prometheus at the compose network or publish the ports if you want dashboards.
 
 ## Notes
 
-- The runner image bundles git, node 20 (for `npx eslint` / `npx tsc`), and the
-  claude CLI; `ANTHROPIC_API_KEY` must be present in `.env` for claude engines.
+- The runner image bundles git and node 20 (for `npx eslint` / `npx tsc`).
+  LLM reviewers are sunset — when they return, the claude CLI goes back into
+  `Dockerfile.runner` and `ANTHROPIC_API_KEY` into `.env`.
 - The old systemd/launchd deployment is retired — if you still have the
   `casino-review` systemd unit enabled from before, `sudo systemctl disable --now
   casino-review` before starting compose, or you'll have two bots reacting.

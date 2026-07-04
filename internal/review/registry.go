@@ -104,9 +104,13 @@ func (r *Registry) validate(trigger string) error {
 		switch s.Engine {
 		case "dispatch":
 		case "claude":
-			if s.PromptFile == "" {
-				return fmt.Errorf("review %q: claude engine requires prompt_file", s.Name)
-			}
+			// SUNSET: LLM review engines are gated off until the hosting infra
+			// is ready to run them properly (claude CLI + key management in the
+			// runner image, cost controls). The foundations remain — engine.go's
+			// interface, claude.go's runner+parser, the persona files, and their
+			// tests — so returning is: delete this branch, restore the CLI in
+			// Dockerfile.runner, and re-add ANTHROPIC_API_KEY to the env.
+			return fmt.Errorf("review %q: claude engines are sunset for now — the plumbing remains in internal/review/claude.go; see README \"LLM reviewers (sunset)\"", s.Name)
 		case "analyzer":
 			if len(s.Cmd) == 0 {
 				return fmt.Errorf("review %q: analyzer engine requires cmd", s.Name)

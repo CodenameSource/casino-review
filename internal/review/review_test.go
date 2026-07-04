@@ -20,12 +20,12 @@ func TestLoadRegistryLegacyFallback(t *testing.T) {
 func TestLoadRegistryFile(t *testing.T) {
 	dir := t.TempDir()
 	persona := filepath.Join(dir, "p.md")
-	os.WriteFile(persona, []byte("be paranoid"), 0o644)
+	os.WriteFile(persona, []byte("be the law"), 0o644)
 	path := filepath.Join(dir, "reviews.json")
 	os.WriteFile(path, []byte(`{
 	  "reviews": [
 	    {"name":"tsetso-review","engine":"dispatch"},
-	    {"name":"paranoid","engine":"claude","prompt_file":"`+persona+`","max_turns":5,"timeout":"1m"},
+	    {"name":"barbie-review","engine":"dispatch"},
 	    {"name":"eslint","engine":"analyzer","cmd":["npx","eslint",".","--format","json"],"parser":"eslint"}
 	  ],
 	  "judges": [{"name":"judge-dread","prompt_file":"`+persona+`"}]
@@ -35,11 +35,23 @@ func TestLoadRegistryFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.Names(); strings.Join(got, ",") != "tsetso-review,paranoid,eslint" {
+	if got := r.Names(); strings.Join(got, ",") != "tsetso-review,barbie-review,eslint" {
 		t.Fatalf("names = %v", got)
 	}
 	if len(r.Judges) != 1 {
 		t.Fatalf("judges = %+v", r.Judges)
+	}
+}
+
+// LLM reviewers are sunset: the registry must refuse claude engines with a
+// message pointing at the foundations, until the gate is deliberately removed.
+func TestLoadRegistrySunsetsClaude(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "r.json")
+	os.WriteFile(p, []byte(`{"reviews":[{"name":"paranoid","engine":"claude","prompt_file":"x.md"}]}`), 0o644)
+	_, err := LoadRegistry(p, nil, "/casino-review")
+	if err == nil || !strings.Contains(err.Error(), "sunset") {
+		t.Fatalf("expected sunset error, got %v", err)
 	}
 }
 

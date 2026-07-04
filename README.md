@@ -7,10 +7,10 @@ sees one, it posts a slot-machine GIF that lands on a randomly chosen review —
 then actually runs it. Review entries are typed engines:
 
 - **dispatch** — post `/<name>` and let an external review bot take it (the original behavior)
-- **claude** — run a Claude Code persona headlessly over a checkout of the PR and post its findings
-- **analyzer** — run a static tool (eslint, tsc, …) over the checkout and post parsed findings
+- **analyzer** — run a static tool (eslint, tsc, …) over a checkout of the PR and post parsed findings
+- **claude** — *sunset for now* (see below): a Claude Code persona over the PR checkout
 
-Casino is in the name: the reel mixes all three. Every spin is a *random
+Casino is in the name: the reel mixes engine types. Every spin is a *random
 assignment* of an engine to a PR, and the system records assignments and
 outcomes — the whole project doubles as a statistics & behavioral experiment
 (see Telemetry). This is Phase 1 of the [PR Market plan](#roadmap): the same
@@ -35,8 +35,8 @@ runner: claim job ──► selector picks engine (assignment logged to events)
 ## Quick start (docker compose)
 
 ```bash
-cp .env.example .env          # fill GITHUB_TOKEN, GITHUB_REPO, ANTHROPIC_API_KEY
-cp reviews.example.json reviews.json   # edit your engine pool + personas/
+cp .env.example .env          # fill GITHUB_TOKEN + GITHUB_REPO
+cp reviews.example.json reviews.json   # edit your engine pool
 docker compose up -d --build
 docker compose logs -f core runner
 ```
@@ -60,17 +60,27 @@ go run ./cmd/core &  go run ./cmd/runner          # the real thing (needs DATABA
 |---|---|---|
 | postgres | —            | source of truth: jobs, review runs, events (and markets, from P2) |
 | core     | `cmd/core`   | trigger poller, dedup, job enqueue, GIF TTL cleanup, migrations |
-| runner   | `cmd/runner` | job executor: GIF spin + engines; image bundles git/node/claude CLI |
+| runner   | `cmd/runner` | job executor: GIF spin + engines; image bundles git + node (analyzers) |
 | (casino) | `cmd/casino` | admin/dry-run CLI: `gen`, `check`, `cleanup`, `db migrate`, `review run` |
 
 ## Reviews registry
 
 `REVIEWS=a,b,c` (legacy) still works — every name becomes a dispatch engine.
 For typed engines, set `REVIEWS_FILE` (compose mounts `./reviews.json`):
-see [reviews.example.json](reviews.example.json) and [personas/](personas/).
-Claude engines run with read-only tools (`Read,Grep,Glob,Bash(git diff/log/show)`),
-a turn cap, and a timeout; they must answer in strict JSON or the run errors —
-the bot never fabricates findings.
+see [reviews.example.json](reviews.example.json).
+
+### LLM reviewers (sunset)
+
+The claude engine is **gated off for now** — the hosting infra isn't ready to
+run it properly (CLI + key management in the runner image, cost controls), and
+a half-supported LLM reviewer is worse than none. The registry rejects
+`"engine": "claude"` with a pointer here. The **foundations remain** for its
+return: the `Engine` interface, the full runner + strict-JSON findings parser
+([internal/review/claude.go](internal/review/claude.go)) with its security
+posture already designed (read-only tools, minimal env, token-free checkouts,
+blockquoted output), the persona files ([personas/](personas/)), and their
+tests. Bringing it back = remove the gate in `registry.validate`, restore the
+CLI in [Dockerfile.runner](Dockerfile.runner), and set `ANTHROPIC_API_KEY`.
 
 ### The bonus round (static addon)
 

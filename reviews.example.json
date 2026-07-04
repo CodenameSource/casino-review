@@ -3,14 +3,7 @@
     { "name": "tsetso-review", "engine": "dispatch" },
     { "name": "dimoreview", "engine": "dispatch" },
     { "name": "gigareview", "engine": "dispatch" },
-    { "name": "barbie-review", "engine": "dispatch" },
-    {
-      "name": "paranoid-sec",
-      "engine": "claude",
-      "prompt_file": "/config/personas/paranoid-sec.md",
-      "max_turns": 30,
-      "timeout": "10m"
-    }
+    { "name": "barbie-review", "engine": "dispatch" }
   ],
   "addon": {
     "name": "static",
