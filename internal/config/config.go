@@ -30,6 +30,11 @@ type Config struct {
 	PostHogKey  string // empty = telemetry no-op
 	PostHogHost string
 	MetricsAddr string // prometheus /metrics listen address; empty = disabled
+
+	SlackBotToken string   // xoxb-… (chat)
+	SlackAppToken string   // xapp-… (socket mode)
+	SlackChannel  string   // channel ID (C…) or #name — the ONLY channel the bot honors
+	SlackAdmins   []string // Slack user IDs allowed to lock/resolve/void; empty = those verbs disabled in Slack
 }
 
 // RepoSlug returns "owner/repo" for the monitored repo.
@@ -77,6 +82,15 @@ func Load() (*Config, error) {
 		PostHogKey:   env("POSTHOG_API_KEY", ""),
 		PostHogHost:  env("POSTHOG_HOST", "https://us.i.posthog.com"),
 		MetricsAddr:  env("METRICS_ADDR", ""),
+
+		SlackBotToken: env("SLACK_BOT_TOKEN", ""),
+		SlackAppToken: env("SLACK_APP_TOKEN", ""),
+		SlackChannel:  env("SLACK_CHANNEL", ""),
+	}
+	for _, id := range strings.Split(env("SLACK_ADMINS", ""), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			c.SlackAdmins = append(c.SlackAdmins, id)
+		}
 	}
 
 	c.Owner, c.Repo = parseRepo(env("GITHUB_REPO", ""))

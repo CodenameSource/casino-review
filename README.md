@@ -56,12 +56,13 @@ go run ./cmd/core &  go run ./cmd/runner          # the real thing (needs DATABA
 
 ## Services
 
-| service  | binary       | role |
+| service  | binary         | role |
 |---|---|---|
-| postgres | —            | source of truth: jobs, review runs, events (and markets, from P2) |
-| core     | `cmd/core`   | trigger poller, dedup, job enqueue, GIF TTL cleanup, migrations |
-| runner   | `cmd/runner` | job executor: GIF spin + engines; image bundles git + node (analyzers) |
-| (casino) | `cmd/casino` | admin/dry-run CLI: `gen`, `check`, `cleanup`, `db migrate`, `review run` |
+| postgres | —              | source of truth: jobs, review runs, events, markets/positions/payouts |
+| core     | `cmd/core`     | trigger poller, dedup, job enqueue, GIF TTL cleanup, migrations |
+| runner   | `cmd/runner`   | job executor: GIF spin + engines; image bundles git + node (analyzers) |
+| slackbot | `cmd/slackbot` | market surface: `/casino` commands (one channel) + notification tailer |
+| (casino) | `cmd/casino`   | admin/dry-run CLI: `gen`, `check`, `cleanup`, `db migrate`, `review run`, `market …` |
 
 ## Reviews registry
 
@@ -97,6 +98,40 @@ revealed only *after* the winner, so there's no early tell. For the experiment,
 propensity), and addon runs are excluded from the selector's signal.
 Preview: `go run ./cmd/casino gen out.gif --bonus static`.
 
+## The market (P2)
+
+People stake USDC-denominated positions on questions about PRs — from Slack,
+in one channel. Three market kinds:
+
+| kind | question | payout |
+|---|---|---|
+| `bounty` | pool pays the PR author when it merges | whole pool → solver |
+| `merge-by` | will this PR merge by \<deadline\>? | parimutuel (winners split the pool pro-rata) |
+| `findings-count` | how many findings will the casino review produce? | parimutuel over buckets `0 / 1-2 / 3-5 / 6+` |
+
+Slack (Socket Mode, honored **only** in `SLACK_CHANNEL`):
+`/casino fund #123 25` · `/casino market #123 merge-by 72h` · `/casino bet 7 yes 10`
+· `/casino board` · `/casino refund 7` · `/casino link <github-login>`.
+The settling verbs (`lock`/`resolve`/`void`) move other people's money and are
+restricted to `SLACK_ADMINS` (unset = disabled in Slack; the CLI on the host is
+the admin path). The CLI mirrors everything
+(`casino market …`), and a notification tailer over the events spine posts
+channel updates for actions from any surface — which is also how the P3
+oracles' resolutions will reach the channel with zero extra wiring.
+
+Money integrity: amounts are int64 micro-USDC (on-chain USDC scaling — the
+Base escrow seam); every state transition is a single guarded transaction
+(concurrent double-resolve/refund is impossible — tested with racing
+goroutines against real Postgres); parimutuel splits are exact big-int math
+with dust audited to a `house` payout row; every money event is written in the
+same transaction as the state change. Resolution is admin-only until the P3
+oracles land (merge → bounty pays; review findings → findings-count resolves).
+
+Setting up the Slack app: create an app, enable **Socket Mode** (app-level
+token with `connections:write`), add a `/casino` slash command, grant the bot
+`chat:write`, `commands`, `channels:read`, install it, invite it to your
+channel, set the three `SLACK_*` envs.
+
 ## Telemetry — the experiment
 
 Three planes, each doing what it's best at:
@@ -124,8 +159,9 @@ Three planes, each doing what it's best at:
 
 ## Roadmap
 
-Phase 2: markets & positions (bounty / merge-by / findings-count over PRs) +
-Slack Socket-Mode bot (`/casino fund|bet|board`). Phase 3: merge & findings
-oracles — bounties pay on merge. Phase 4: disputed resolutions are judged by a
-slot-machine-selected LLM judge. Phase 5: weighted selector, stats digest.
-See the plan in the repo history / pr-market-spec.
+~~Phase 2: markets & positions + Slack bot~~ ✅. Phase 3: merge & findings
+oracles — bounties pay on merge, findings-count locks at spin start and
+resolves from `review_runs`. Phase 4: disputed resolutions judged by a
+slot-machine-selected LLM judge (blocked on un-sunsetting LLM reviewers; human
+`resolve` is the mechanism until then). Phase 5: weighted selector, stats
+digest, static board publish.

@@ -51,6 +51,19 @@ services:
       - ./reviews.json:/config/reviews.json:ro
       - ./personas:/config/personas:ro
 
+  slackbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.slackbot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
+      METRICS_ADDR: ":9090"
+
 volumes:
   pgdata:
   runner-work:

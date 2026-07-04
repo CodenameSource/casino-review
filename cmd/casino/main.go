@@ -62,6 +62,8 @@ func main() {
 			usage()
 		}
 		runReview(cfg, os.Args[3:])
+	case "market":
+		runMarket(cfg, os.Args[2:])
 	default:
 		usage()
 	}
@@ -73,7 +75,12 @@ func usage() {
   casino check
   casino cleanup
   casino db migrate
-  casino review run <engine> --pr N [--post]`)
+  casino review run <engine> --pr N [--post]
+  casino market fund <ctx> <amount> [--as id]
+  casino market create <ctx> <kind> [deadline] [--as id]
+  casino market bet <id> <outcome> <amount> [--as id]
+  casino market board | refund <id> | lock <id> | void <id> [reason]
+  casino market resolve <id> <outcome> [--solver login] [--as id]`)
 	os.Exit(2)
 }
 

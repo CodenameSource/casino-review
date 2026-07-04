@@ -13,13 +13,18 @@ cp reviews.example.json reviews.json   # define your engine pool + the static ad
 docker compose up -d --build
 ```
 
+For the market surface, also set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+`SLACK_CHANNEL` in `.env` (Slack app setup: README → "The market").
+
 Verify:
 
 ```bash
 docker compose ps                              # all services healthy/running
 docker compose logs -f core                    # "watching owner/repo for /casino-review …"
 docker compose logs -f runner                  # "runner: N engines loaded …"
+docker compose logs -f slackbot                # "honoring /casino only in channel C…"
 docker compose exec core casino check          # read-only GitHub smoke test
+docker compose exec core casino market board   # the market board from the CLI
 ```
 
 ## Upgrade
