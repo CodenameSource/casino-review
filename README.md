@@ -134,15 +134,20 @@ channel, set the three `SLACK_*` envs.
 
 ## Telemetry — the experiment
 
-Three planes, each doing what it's best at:
+Two planes, each doing what it's best at:
 
 1. **`events` table (Postgres)** — the scientific record. Append-only; spin
    events log the full assignment (candidate pool, selector, chosen index) so
    the randomized-assignment experiment (which engine works best?) is analyzable.
-2. **PostHog** (optional, `POSTHOG_API_KEY`) — behavioral analytics: who
-   triggers, engine outcomes, claude cost per run. Fire-and-forget.
-3. **Prometheus** (`METRICS_ADDR`) — ops: job durations, findings histograms,
-   poll lag, GitHub rate headroom, claude spend counters.
+   Market/money events are written in the same transaction as the state change,
+   so the log can never drift from the ledger.
+2. **Prometheus** (`METRICS_ADDR`) — ops: job durations, findings histograms,
+   poll lag, GitHub rate headroom.
+
+A third plane — **PostHog** behavioral analytics — was dropped for now: its
+client pulled in a compile-heavy dependency that OOM-killed builds on 1 GB VMs.
+The `telemetry.Track` seam remains a no-op, so restoring it is re-adding the
+client without touching call sites.
 
 ## Notes & caveats
 

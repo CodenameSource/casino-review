@@ -41,7 +41,7 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	tel := telemetry.New(cfg.PostHogKey, cfg.PostHogHost)
+	tel := telemetry.New()
 	defer tel.Close()
 
 	g, ctx := errgroup.WithContext(ctx)

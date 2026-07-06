@@ -61,7 +61,7 @@ func runMarket(cfg *config.Config, args []string) {
 	if err := st.Migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
-	tel := telemetry.New(cfg.PostHogKey, cfg.PostHogHost)
+	tel := telemetry.New()
 	defer tel.Close()
 	svc := market.NewService(cfg, ledger.New(st), tel)
 

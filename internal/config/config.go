@@ -27,8 +27,6 @@ type Config struct {
 	Workdir     string // runner scratch space for PR checkouts
 	ClaudeBin   string // claude CLI binary for LLM engines/judges
 
-	PostHogKey  string // empty = telemetry no-op
-	PostHogHost string
 	MetricsAddr string // prometheus /metrics listen address; empty = disabled
 
 	SlackBotToken string   // xoxb-… (chat)
@@ -79,8 +77,6 @@ func Load() (*Config, error) {
 		ReviewsFile:  env("REVIEWS_FILE", ""),
 		Workdir:      env("WORKDIR", "./work"),
 		ClaudeBin:    env("CLAUDE_BIN", "claude"),
-		PostHogKey:   env("POSTHOG_API_KEY", ""),
-		PostHogHost:  env("POSTHOG_HOST", "https://us.i.posthog.com"),
 		MetricsAddr:  env("METRICS_ADDR", ""),
 
 		SlackBotToken: env("SLACK_BOT_TOKEN", ""),

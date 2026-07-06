@@ -1,4 +1,4 @@
-// Package telemetry is the experiment's measurement layer, on three planes:
+// Package telemetry is the experiment's measurement layer, on two planes:
 //
 //  1. events — append-only rows in Postgres, the scientific record. Market
 //     and money events must be written in the same transaction as the state
@@ -7,21 +7,21 @@
 //     chosen index): the slot machine is a randomizer, so every spin is a
 //     random assignment — an RCT — and assignments must be recorded, not
 //     just outcomes.
-//  2. PostHog — behavioral/product analytics (Slack funnels, bet timing,
-//     retention, claude run cost). Fire-and-forget and buffered: analytics
-//     must never block or fail a money path. No-ops when unconfigured.
-//  3. Prometheus — ops metrics served on METRICS_ADDR.
+//  2. Prometheus — ops metrics served on METRICS_ADDR.
+//
+// A third plane, PostHog behavioral analytics, was dropped for now: its client
+// pulled in a compile-heavy dependency (goccy/go-json) that OOM-killed builds
+// on small (1 GB) VMs. The Track seam below remains as a no-op so the call
+// sites stay put — restoring PostHog is re-adding the client here plus the dep.
 package telemetry
 
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/posthog/posthog-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -41,35 +41,14 @@ type Event struct {
 	Payload    any    // JSON-marshalled
 }
 
-// T is the telemetry hub shared by all services.
-type T struct {
-	posthog posthog.Client
-	log     *log.Logger
-}
+// T is the telemetry hub shared by all services. With PostHog dropped it holds
+// no state, but stays as the seam for behavioral tracking.
+type T struct{}
 
-// New builds the hub. posthogKey=="" disables PostHog (no-op).
-func New(posthogKey, posthogHost string) *T {
-	t := &T{log: log.Default()}
-	if posthogKey != "" {
-		cfg := posthog.Config{}
-		if posthogHost != "" {
-			cfg.Endpoint = posthogHost
-		}
-		client, err := posthog.NewWithConfig(posthogKey, cfg)
-		if err != nil {
-			log.Printf("telemetry: posthog disabled: %v", err)
-		} else {
-			t.posthog = client
-		}
-	}
-	return t
-}
+// New builds the hub.
+func New() *T { return &T{} }
 
-func (t *T) Close() {
-	if t.posthog != nil {
-		t.posthog.Close()
-	}
-}
+func (t *T) Close() {}
 
 // Emit writes an event row using the given executor — pass the transaction
 // for money/market events so the record commits atomically with the change.
@@ -84,24 +63,10 @@ func Emit(ctx context.Context, exec Execer, ev Event) error {
 	return err
 }
 
-// Track sends a behavioral event to PostHog. Never blocks, never errors the
-// caller; silently a no-op when PostHog is not configured.
-func (t *T) Track(distinctID, event string, props map[string]any) {
-	if t == nil || t.posthog == nil {
-		return
-	}
-	p := posthog.NewProperties()
-	for k, v := range props {
-		p.Set(k, v)
-	}
-	if err := t.posthog.Enqueue(posthog.Capture{
-		DistinctId: distinctID,
-		Event:      event,
-		Properties: p,
-	}); err != nil {
-		t.log.Printf("telemetry: posthog enqueue: %v", err)
-	}
-}
+// Track is the behavioral-analytics seam. Currently a no-op (PostHog dropped —
+// see the package doc). The Postgres events spine remains the durable record;
+// this exists so behavioral tracking can be restored without touching callers.
+func (t *T) Track(distinctID, event string, props map[string]any) {}
 
 // --- Prometheus (ops plane) ---
 

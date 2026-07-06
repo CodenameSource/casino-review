@@ -51,7 +51,7 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
-	tel := telemetry.New(cfg.PostHogKey, cfg.PostHogHost)
+	tel := telemetry.New()
 	defer tel.Close()
 
 	gh := github.New(cfg.Token, cfg.Owner, cfg.Repo)
