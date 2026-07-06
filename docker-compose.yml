@@ -1,5 +1,19 @@
 name: casino-review
 
+# All three app services run the SAME image (built once from ./Dockerfile) and
+# differ only by which binary they launch. This is the key to a bearable build
+# on a small droplet: one compile, not three.
+x-app: &app
+  image: casino-review:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  env_file: .env
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -17,14 +31,8 @@ services:
       retries: 10
 
   core:
-    build:
-      context: .
-      dockerfile: Dockerfile.core
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file: .env
+    <<: *app
+    command: ["core"]
     environment:
       DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
       METRICS_ADDR: ":9090"
@@ -32,14 +40,8 @@ services:
   # NOTE: keep runner at 1 replica. The checkout lock is process-local; scaled
   # replicas sharing the /work volume would race in the same working tree.
   runner:
-    build:
-      context: .
-      dockerfile: Dockerfile.runner
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file: .env
+    <<: *app
+    command: ["runner"]
     environment:
       DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
       METRICS_ADDR: ":9090"
@@ -47,19 +49,12 @@ services:
       REVIEWS_FILE: /config/reviews.json
     volumes:
       - runner-work:/work
-      # Mount your registry + personas read-only; edit on the host, restart runner.
+      # Edit reviews.json on the host, then `docker compose restart runner`.
       - ./reviews.json:/config/reviews.json:ro
-      - ./personas:/config/personas:ro
 
   slackbot:
-    build:
-      context: .
-      dockerfile: Dockerfile.slackbot
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file: .env
+    <<: *app
+    command: ["slackbot"]
     environment:
       DATABASE_URL: postgres://casino:${POSTGRES_PASSWORD:-casino}@postgres:5432/casino
       METRICS_ADDR: ":9090"

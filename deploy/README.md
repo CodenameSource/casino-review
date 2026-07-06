@@ -1,7 +1,34 @@
 # Deploying casino-review (docker compose)
 
-The stack is compose-managed: `postgres` + `core` + `runner`. No public URL is
-required (GitHub is polled; Slack — from P2 — uses Socket Mode).
+The stack is compose-managed: `postgres` + `core` + `runner` + `slackbot`. No
+public URL is required (GitHub is polled; Slack uses Socket Mode). All three app
+services share ONE image (`./Dockerfile`, built once) — they differ only by
+which binary they launch, so a deploy compiles the Go code a single time.
+
+## Small droplets: build off-box (strongly recommended)
+
+Compiling Go needs ~1–2 GB of free RAM for the link step. On a 1–2 GB droplet
+`docker compose build` will swap-thrash (10–30 min, CPU pegged). Two ways to
+avoid compiling on the droplet:
+
+**A. Add swap** (one-time; also protects the running services from OOM):
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h        # confirm Swap is now non-zero
+```
+
+**B. Build somewhere with RAM, ship the image** — no registry needed:
+
+```bash
+# on your laptop / CI (note --platform for the droplet's arch):
+docker build --platform linux/amd64 -t casino-review:local .
+docker save casino-review:local | gzip | ssh droplet 'gunzip | docker load'
+# on the droplet: start WITHOUT --build so it uses the loaded image
+docker compose up -d
+```
 
 ## First deploy on a VM
 
@@ -10,7 +37,7 @@ git clone https://github.com/CodenameSource/casino-review.git ~/casino-review
 cd ~/casino-review
 cp .env.example .env            # fill GITHUB_TOKEN, GITHUB_REPO, POSTGRES_PASSWORD
 cp reviews.example.json reviews.json   # define your engine pool + the static addon
-docker compose up -d --build
+docker compose up -d --build    # (add swap first on a small box — see above)
 ```
 
 For the market surface, also set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
