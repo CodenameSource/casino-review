@@ -25,6 +25,25 @@ func openTestStore(t *testing.T) *Store {
 	return st
 }
 
+// Regression: GitHub comment IDs (~5 billion) exceed int32. The insert must
+// store them as BIGINT, not coerce the parameter to int4.
+func TestInsertReviewRunLargeCommentID(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	n0 := 0
+	id, err := st.InsertReviewRun(ctx, ReviewRun{
+		Repo: "big/repo", PR: 3647, Engine: "gigareview", EngineKind: "dispatch",
+		CommentID: 4901804863, FindingsCount: &n0, // real prod value from the field
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("large comment_id must insert: %v", err)
+	}
+	if id == 0 {
+		t.Fatal("expected a returned id")
+	}
+}
+
 func TestTrackedPRs(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()

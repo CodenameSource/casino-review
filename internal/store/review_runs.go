@@ -28,10 +28,13 @@ type ReviewRun struct {
 
 func (s *Store) InsertReviewRun(ctx context.Context, r ReviewRun) (int64, error) {
 	var id int64
+	// job_id and comment_id are BIGINT: the NULLIF sentinel MUST be 0::bigint,
+	// not a bare 0. A bare 0 is an int4 literal and makes Postgres infer the
+	// parameter as int4, overflowing on real GitHub comment IDs (~5 billion).
 	err := s.Pool.QueryRow(ctx,
 		`INSERT INTO review_runs
 		   (repo, pr, engine, engine_kind, job_id, findings_count, findings, summary, comment_id, error, started_at, finished_at)
-		 VALUES ($1,$2,$3,$4,NULLIF($5,0),$6,$7,NULLIF($8,''),NULLIF($9,0),NULLIF($10,''),$11,$12)
+		 VALUES ($1,$2,$3,$4,NULLIF($5,0::bigint),$6,$7,NULLIF($8,''),NULLIF($9,0::bigint),NULLIF($10,''),$11,$12)
 		 RETURNING id`,
 		r.Repo, r.PR, r.Engine, r.EngineKind, r.JobID, r.FindingsCount, r.Findings,
 		r.Summary, r.CommentID, r.Error, r.StartedAt, r.FinishedAt).Scan(&id)
