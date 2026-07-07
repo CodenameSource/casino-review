@@ -90,6 +90,15 @@ func (s *Store) FinishJob(ctx context.Context, id int64, jobErr error) error {
 	return err
 }
 
+// PendingSpins counts spin jobs still queued or running — triggers that have
+// been accepted but not yet turned into a posted review.
+func (s *Store) PendingSpins(ctx context.Context) (int, error) {
+	var n int
+	err := s.Pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM jobs WHERE kind='spin' AND state IN ('queued','running')`).Scan(&n)
+	return n, err
+}
+
 // RequeueJob returns one running job to the queue — used when a shutdown
 // (not a failure) interrupted it. Attempts already counted at claim time.
 func (s *Store) RequeueJob(ctx context.Context, id int64) error {

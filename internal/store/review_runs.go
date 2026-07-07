@@ -38,6 +38,47 @@ func (s *Store) InsertReviewRun(ctx context.Context, r ReviewRun) (int64, error)
 	return id, err
 }
 
+// TrackedPR summarizes one PR casino-review has acted on.
+type TrackedPR struct {
+	PR           int
+	Runs         int       // total review runs (spins × engines) on this PR
+	LastEngine   string    // engine of the most recent run
+	LastKind     string    // dispatch | claude | analyzer | addon
+	LastFindings *int      // nil = unknown (dispatch) or the run errored
+	LastAt       time.Time // most recent run
+	LastError    string    // non-empty if the most recent run failed
+}
+
+// TrackedPRs lists the PRs in a repo that have had a casino review, most
+// recently active first — the answer to "which PRs has /casino-review touched?".
+func (s *Store) TrackedPRs(ctx context.Context, repo string, limit int) ([]TrackedPR, error) {
+	rows, err := s.Pool.Query(ctx,
+		`WITH latest AS (
+		   SELECT DISTINCT ON (pr) pr, engine, engine_kind, findings_count, started_at, COALESCE(error,'') AS error
+		   FROM review_runs WHERE repo=$1
+		   ORDER BY pr, started_at DESC
+		 ), counts AS (
+		   SELECT pr, COUNT(*) AS runs FROM review_runs WHERE repo=$1 GROUP BY pr
+		 )
+		 SELECT l.pr, c.runs, l.engine, l.engine_kind, l.findings_count, l.started_at, l.error
+		 FROM latest l JOIN counts c USING (pr)
+		 ORDER BY l.started_at DESC
+		 LIMIT $2`, repo, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrackedPR
+	for rows.Next() {
+		var t TrackedPR
+		if err := rows.Scan(&t.PR, &t.Runs, &t.LastEngine, &t.LastKind, &t.LastFindings, &t.LastAt, &t.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // LastReviewRun returns the most recent finished REEL run for a repo (any PR),
 // which feeds the selector's PreviousHadFindings signal. Addon (bonus) runs are
 // excluded: they aren't reel assignments, and letting them shadow the previous

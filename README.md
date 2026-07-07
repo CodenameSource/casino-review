@@ -51,6 +51,7 @@ go run ./cmd/casino gen out.gif                   # preview a spin, no GitHub ne
 set -a; . ./.env; set +a
 go run ./cmd/casino check                         # read-only GitHub smoke test
 go run ./cmd/casino review run eslint --pr 42     # dry-run one engine (add --post to publish)
+go run ./cmd/casino prs                           # PRs /casino-review has acted on
 go run ./cmd/core &  go run ./cmd/runner          # the real thing (needs DATABASE_URL)
 ```
 

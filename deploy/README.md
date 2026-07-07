@@ -54,6 +54,7 @@ docker compose logs -f runner                  # "runner: N engines loaded …"
 docker compose logs -f slackbot                # "honoring /casino only in channel C…"
 docker compose exec core casino check          # read-only GitHub smoke test
 docker compose exec core casino market board   # the market board from the CLI
+docker compose exec core casino prs             # PRs /casino-review has acted on
 ```
 
 ## Upgrade

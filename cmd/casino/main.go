@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,11 +63,72 @@ func main() {
 			usage()
 		}
 		runReview(cfg, os.Args[3:])
+	case "prs":
+		runPRs(cfg, os.Args[2:])
 	case "market":
 		runMarket(cfg, os.Args[2:])
 	default:
 		usage()
 	}
+}
+
+// runPRs lists the PRs casino-review has acted on (where /casino-review ran).
+func runPRs(cfg *config.Config, args []string) {
+	if cfg.DatabaseURL == "" {
+		log.Fatalf("DATABASE_URL is required")
+	}
+	fs := flag.NewFlagSet("prs", flag.ExitOnError)
+	limit := fs.Int("limit", 50, "max PRs to show")
+	fs.Parse(args)
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	defer st.Close()
+
+	prs, err := st.TrackedPRs(ctx, cfg.RepoSlug(), *limit)
+	if err != nil {
+		log.Fatalf("tracked prs: %v", err)
+	}
+	pending, _ := st.PendingSpins(ctx)
+
+	if len(prs) == 0 {
+		fmt.Printf("no PRs tracked yet for %s (post /%s on a PR to start)\n", cfg.RepoSlug(), strings.TrimPrefix(cfg.Trigger, "/"))
+	} else {
+		fmt.Printf("tracked PRs for %s (%d shown):\n", cfg.RepoSlug(), len(prs))
+		fmt.Printf("  %-6s %-5s %-16s %-9s %-20s %s\n", "PR", "spins", "last-engine", "findings", "last-run (UTC)", "status")
+		for _, p := range prs {
+			findings := "?"
+			if p.LastFindings != nil {
+				findings = strconv.Itoa(*p.LastFindings)
+			}
+			status := "ok"
+			if p.LastError != "" {
+				status = "ERROR: " + firstLine(p.LastError)
+			}
+			engine := p.LastEngine
+			if p.LastKind == "addon" {
+				engine += " (bonus)"
+			}
+			fmt.Printf("  #%-5d %-5d %-16s %-9s %-20s %s\n",
+				p.PR, p.Runs, engine, findings, p.LastAt.UTC().Format("2006-01-02 15:04"), status)
+		}
+	}
+	if pending > 0 {
+		fmt.Printf("\n%d spin(s) in flight (triggered, review not posted yet)\n", pending)
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 60 {
+		s = s[:60] + "…"
+	}
+	return s
 }
 
 func usage() {
@@ -76,6 +138,7 @@ func usage() {
   casino cleanup
   casino db migrate
   casino review run <engine> --pr N [--post]
+  casino prs [--limit N]                              # PRs /casino-review has acted on
   casino market fund <ctx> <amount> [--as id]
   casino market create <ctx> <kind> [deadline] [--as id]
   casino market bet <id> <outcome> <amount> [--as id]
