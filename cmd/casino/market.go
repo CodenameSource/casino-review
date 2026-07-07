@@ -23,6 +23,8 @@ import (
 //	casino market create <ctx> <kind> [deadline] [--as id]
 //	casino market bet <id> <outcome> <amount> [--as id]
 //	casino market board
+//	casino market show <id> [--as id]
+//	casino market me [--as id]
 //	casino market refund <id> [--as id]
 //	casino market lock <id> [--as id]
 //	casino market resolve <id> <outcome> [--solver login] [--as id]
@@ -143,6 +145,48 @@ func runMarket(cfg *config.Config, args []string) {
 				i+1, r.Market.ID, r.Market.ContextRef, r.Pool, r.Participants,
 				r.Market.Kind, r.Market.State, r.Market.Question)
 		}
+
+	case "show":
+		d, err := svc.Detail(ctx, mustID(0), actor)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		m := d.Market
+		fmt.Printf("#%d %s [%s] pool %s · %d backer(s)\n%s\n",
+			m.ID, m.Kind, m.State, d.Pool, d.Backers, m.Question)
+		if m.Kind == "bounty" {
+			if mine := d.MyStake["merged"]; mine > 0 {
+				fmt.Printf("your stake: %s\n", mine)
+			}
+			break
+		}
+		for _, o := range market.Odds(m.Outcomes, d.OutcomePools) {
+			payout := "-"
+			if o.PayoutX > 0 {
+				payout = fmt.Sprintf("%.2fx", o.PayoutX)
+			}
+			mine := ""
+			if v := d.MyStake[o.Outcome]; v > 0 {
+				mine = fmt.Sprintf(" (you: %s)", v)
+			}
+			fmt.Printf("  %-12s %-9s %3d%% pays %s%s\n", o.Outcome, o.Pool, int(o.Prob*100+0.5), payout, mine)
+		}
+
+	case "me":
+		ps, err := svc.MyPositions(ctx, actor)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+		if len(ps) == 0 {
+			fmt.Println("no open positions")
+			return
+		}
+		var total ledger.USDC
+		for _, p := range ps {
+			fmt.Printf("#%-4d %-14s %-10s %-9s %s\n", p.MarketID, p.Kind, p.Outcome, p.Amount, p.ContextRef)
+			total += p.Amount
+		}
+		fmt.Printf("total staked: %s\n", total)
 
 	case "refund":
 		amt, err := svc.Refund(ctx, mustID(0), actor)

@@ -14,6 +14,10 @@ func TestParse(t *testing.T) {
 		{in: "", want: Command{Name: "help"}},
 		{in: "help", want: Command{Name: "help"}},
 		{in: "board", want: Command{Name: "board"}},
+		{in: "show 7", want: Command{Name: "show", MarketID: 7}},
+		{in: "show #7", want: Command{Name: "show", MarketID: 7}},
+		{in: "me", want: Command{Name: "me"}},
+		{in: "prs", want: Command{Name: "prs"}},
 		{in: "fund #123 25", want: Command{Name: "fund", Context: "#123", Amount: "25"}},
 		{in: "fund ext:PROJ-42 $10.50", want: Command{Name: "fund", Context: "ext:PROJ-42", Amount: "$10.50"}},
 		{in: "market #123 merge-by 72h", want: Command{Name: "market", Context: "#123", Kind: "merge-by", Rest: "72h"}},
@@ -25,7 +29,21 @@ func TestParse(t *testing.T) {
 		{in: "void 12 dupe market", want: Command{Name: "void", MarketID: 12, Rest: "dupe market"}},
 		{in: "link @octocat", want: Command{Name: "link", Rest: "octocat"}},
 		{in: "resolve 7 merged solver=octocat", want: Command{Name: "resolve", MarketID: 7, Outcome: "merged"}},
+
+		// aliases fold onto canonical verbs
+		{in: "markets", want: Command{Name: "board"}},
+		{in: "mine", want: Command{Name: "me"}},
+		{in: "status", want: Command{Name: "prs"}},
+		{in: "open #123 merge-by 72h", want: Command{Name: "market", Context: "#123", Kind: "merge-by", Rest: "72h"}},
+		{in: "cashout 7", want: Command{Name: "refund", MarketID: 7}},
+		{in: "cash 7", want: Command{Name: "refund", MarketID: 7}},
+		// verbs are case-insensitive
+		{in: "BOARD", want: Command{Name: "board"}},
+		{in: "Open #9 findings-count", want: Command{Name: "market", Context: "#9", Kind: "findings-count"}},
+
 		{in: "fund", err: true},
+		{in: "show", err: true},
+		{in: "show seven", err: true},
 		{in: "bet 7 yes", err: true},
 		{in: "bet seven yes 1", err: true},
 		{in: "resolve 7", err: true},

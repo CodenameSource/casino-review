@@ -127,3 +127,38 @@ func (s *Service) Board(ctx context.Context, limit int) ([]ledger.BoardRow, erro
 func (s *Service) Get(ctx context.Context, id int64) (ledger.Market, ledger.USDC, error) {
 	return s.led.Get(ctx, id)
 }
+
+// Detail is everything needed to render one market: the market, its total and
+// per-outcome pools, backer count, and the caller's own stake per outcome.
+type Detail struct {
+	Market       ledger.Market
+	Pool         ledger.USDC
+	Backers      int
+	OutcomePools map[string]ledger.USDC
+	MyStake      map[string]ledger.USDC
+}
+
+func (s *Service) Detail(ctx context.Context, id int64, participant string) (Detail, error) {
+	m, pool, err := s.led.Get(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+	pools, err := s.led.OutcomePools(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+	backers, err := s.led.ParticipantCount(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+	mine, err := s.led.StakeByOutcome(ctx, id, participant)
+	if err != nil {
+		return Detail{}, err
+	}
+	return Detail{Market: m, Pool: pool, Backers: backers, OutcomePools: pools, MyStake: mine}, nil
+}
+
+// MyPositions lists a participant's active stakes across all markets.
+func (s *Service) MyPositions(ctx context.Context, participant string) ([]ledger.PositionView, error) {
+	return s.led.ActivePositions(ctx, participant)
+}

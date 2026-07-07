@@ -127,6 +127,21 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		}
 		return renderBoard(rows), false
 
+	case "show":
+		d, err := b.svc.Detail(ctx, cmd.MarketID, participant)
+		if err != nil {
+			return "⚠️ " + err.Error(), true
+		}
+		return renderMarketDetail(d), true
+
+	case "me":
+		positions, err := b.svc.MyPositions(ctx, participant)
+		if err != nil {
+			return "⚠️ " + err.Error(), true
+		}
+		login, _ := b.st.GithubLogin(ctx, sc.UserID)
+		return renderMyPositions(positions, login), true
+
 	case "prs":
 		prs, err := b.st.TrackedPRs(ctx, b.cfg.RepoSlug(), 15)
 		if err != nil {
@@ -145,8 +160,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 			return "⚠️ " + err.Error(), true
 		}
 		_, pool, _ := b.svc.Get(ctx, m.ID)
-		return fmt.Sprintf("💰 <@%s> staked %s on market #%d (%s) — pool now %s",
-			sc.UserID, amt, m.ID, m.ContextRef, pool), false
+		return fmt.Sprintf("💰 <@%s> funded %s → *#%d* `%s` · pool now *%s*  ·  `/casino show %d`",
+			sc.UserID, amt, m.ID, m.ContextRef, pool, m.ID), false
 
 	case "market":
 		spec := map[string]any{}
@@ -161,8 +176,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		if err != nil {
 			return "⚠️ " + err.Error(), true
 		}
-		return fmt.Sprintf("🆕 Market #%d — %s\nOutcomes: `%s` · bet with `/casino bet %d <outcome> <amount>`",
-			m.ID, m.Question, strings.Join(m.Outcomes, "` `"), m.ID), false
+		return fmt.Sprintf("🆕 Market *#%d* — %s %s\n_%s_\nOutcomes: `%s`\n🎲 `/casino bet %d <outcome> <amount>`",
+			m.ID, kindEmoji(m.Kind), m.Kind, m.Question, strings.Join(m.Outcomes, "` `"), m.ID), false
 
 	case "bet":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
@@ -173,8 +188,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 			return "⚠️ " + err.Error(), true
 		}
 		_, pool, _ := b.svc.Get(ctx, cmd.MarketID)
-		return fmt.Sprintf("🎲 <@%s> put %s on *%s* (market #%d) — pool now %s",
-			sc.UserID, amt, cmd.Outcome, cmd.MarketID, pool), false
+		return fmt.Sprintf("🎲 <@%s> put %s on *%s* (*#%d*) · pool now *%s*  ·  `/casino show %d`",
+			sc.UserID, amt, cmd.Outcome, cmd.MarketID, pool, cmd.MarketID), false
 
 	case "refund":
 		amt, err := b.svc.Refund(ctx, cmd.MarketID, participant)
@@ -286,21 +301,106 @@ func firstWord(s string) string {
 	return ""
 }
 
+func kindEmoji(kind string) string {
+	switch kind {
+	case "bounty":
+		return "💰"
+	case "merge-by":
+		return "📅"
+	case "findings-count":
+		return "🔎"
+	}
+	return "🎯"
+}
+
 func renderBoard(rows []ledger.BoardRow) string {
 	if len(rows) == 0 {
-		return "🎰 The board is empty — open the bidding with `/casino fund #<pr> <amount>`."
+		return "🎰 *No markets open yet — be the first.*\n" +
+			"• `/casino fund #<pr> 25` — 💰 bounty the author on merge\n" +
+			"• `/casino open #<pr> merge-by 72h` — 📅 bet on the merge deadline\n" +
+			"`/casino help` for the full table."
 	}
 	var sb strings.Builder
-	sb.WriteString("🎰 *The Board* — live markets by pool\n")
-	for i, r := range rows {
-		state := ""
+	sb.WriteString("🎰 *The Board* — where the money's at")
+	for _, r := range rows {
+		lock := ""
 		if r.Market.State == ledger.StateLocked {
-			state = " 🔒"
+			lock = " 🔒"
 		}
-		fmt.Fprintf(&sb, "%d. *#%d* %s — *%s* (%d backer(s))%s\n   _%s_ [%s]\n",
-			i+1, r.Market.ID, r.Market.ContextRef, r.Pool, r.Participants, state,
-			r.Market.Question, r.Market.Kind)
+		fmt.Fprintf(&sb, "\n\n*#%d* `%s` · %s %s · *%s* · %d backer(s)%s\n_%s_  →  `/casino show %d`",
+			r.Market.ID, r.Market.ContextRef, kindEmoji(r.Market.Kind), r.Market.Kind,
+			r.Pool, r.Participants, lock, r.Market.Question, r.Market.ID)
 	}
+	return sb.String()
+}
+
+// renderMarketDetail is the `/casino show <id>` view: odds, your stake, and how
+// to act on it.
+func renderMarketDetail(d market.Detail) string {
+	m := d.Market
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Market #%d* — %s %s · [%s]\n_%s_\nPool *%s* · %d backer(s)\n",
+		m.ID, kindEmoji(m.Kind), m.Kind, m.State, m.Question, d.Pool, d.Backers)
+
+	if m.Kind == "bounty" {
+		if mine := d.MyStake["merged"]; mine > 0 {
+			fmt.Fprintf(&sb, "Your stake: *%s*\n", mine)
+		}
+		if m.State == ledger.StateOpen {
+			fmt.Fprintf(&sb, "\n💰 Add to the bounty: `/casino fund %s <amount>`", m.ContextRef)
+		}
+		return sb.String()
+	}
+
+	sb.WriteString("\n")
+	for _, o := range market.Odds(m.Outcomes, d.OutcomePools) {
+		payout := "—"
+		if o.PayoutX > 0 {
+			payout = fmt.Sprintf("~%.2f×", o.PayoutX)
+		}
+		fmt.Fprintf(&sb, "`%-10s` %s  (%d%%) · win pays %s\n", o.Outcome, o.Pool, int(o.Prob*100+0.5), payout)
+	}
+	var mine []string
+	for _, o := range m.Outcomes {
+		if v := d.MyStake[o]; v > 0 {
+			mine = append(mine, fmt.Sprintf("*%s* %s", o, v))
+		}
+	}
+	if len(mine) > 0 {
+		fmt.Fprintf(&sb, "\nYour stake: %s\n", strings.Join(mine, ", "))
+	}
+	if m.State == ledger.StateOpen {
+		fmt.Fprintf(&sb, "\n🎲 `/casino bet %d <outcome> <amount>`  ·  ↩️ `/casino refund %d`", m.ID, m.ID)
+	}
+	return sb.String()
+}
+
+// renderMyPositions is the `/casino me` view.
+func renderMyPositions(ps []ledger.PositionView, githubLogin string) string {
+	id := "not linked — `/casino link <github-login>` so bounties can pay you"
+	if githubLogin != "" {
+		id = "github:" + githubLogin
+	}
+	if len(ps) == 0 {
+		return fmt.Sprintf("🎰 *Your bets* — %s\nNo open bets yet. See `/casino board`.", id)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🎰 *Your bets* — %s", id)
+	var total ledger.USDC
+	for _, p := range ps {
+		outcome := ""
+		if p.Kind != "bounty" {
+			outcome = "*" + p.Outcome + "* "
+		}
+		lock := ""
+		if p.MarketState == ledger.StateLocked {
+			lock = " 🔒"
+		}
+		fmt.Fprintf(&sb, "\n• *#%d* %s %s · %s%s · `%s`%s",
+			p.MarketID, kindEmoji(p.Kind), p.Kind, outcome, p.Amount, p.ContextRef, lock)
+		total += p.Amount
+	}
+	fmt.Fprintf(&sb, "\nTotal staked: *%s*", total)
 	return sb.String()
 }
 

@@ -142,7 +142,8 @@ func usage() {
   casino market fund <ctx> <amount> [--as id]
   casino market create <ctx> <kind> [deadline] [--as id]
   casino market bet <id> <outcome> <amount> [--as id]
-  casino market board | refund <id> | lock <id> | void <id> [reason]
+  casino market board | show <id> | me [--as id]
+  casino market refund <id> | lock <id> | void <id> [reason]
   casino market resolve <id> <outcome> [--solver login] [--as id]`)
 	os.Exit(2)
 }

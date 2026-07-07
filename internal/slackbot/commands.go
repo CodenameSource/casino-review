@@ -12,14 +12,24 @@ import (
 
 // Command is a parsed /casino invocation.
 type Command struct {
-	Name     string // fund|market|bet|board|refund|link|lock|resolve|void|help
+	Name     string // help|board|show|me|fund|market|bet|refund|link|prs|lock|resolve|void
 	Context  string // raw context input (#123, pr:o/r#1, ext:KEY)
 	Kind     string
 	MarketID int64
 	Outcome  string
 	Amount   string            // raw, parsed by ledger.ParseUSDC
-	Args     map[string]string // key=value extras (solver=login, reason=?)
+	Args     map[string]string // key=value extras (solver=login)
 	Rest     string
+}
+
+// aliases map friendlier / casino-flavored verbs onto the canonical command.
+var aliases = map[string]string{
+	"markets": "board",
+	"open":    "market", // "open a market" reads better than "market" as a verb
+	"cashout": "refund", // casino-native for pulling your stake
+	"cash":    "refund",
+	"mine":    "me",
+	"status":  "prs",
 }
 
 // Parse turns the slash-command text into a Command. Pure — unit tested.
@@ -29,11 +39,13 @@ func Parse(text string) (Command, error) {
 		return Command{Name: "help"}, nil
 	}
 	cmd := Command{Name: strings.ToLower(f[0]), Args: map[string]string{}}
+	if canon, ok := aliases[cmd.Name]; ok {
+		cmd.Name = canon
+	}
 	rest := f[1:]
 
-	// Collect key=value pairs anywhere in the tail. Keys must be purely
-	// alphabetic (solver=…, reason=…) so tokens like "ext:KEY=1" — a
-	// legitimate context ref — are never eaten as arguments.
+	// key=value pairs anywhere in the tail. Keys must be purely alphabetic
+	// (solver=…), so a context ref like "ext:KEY=1" is never eaten as an arg.
 	var plain []string
 	for _, tok := range rest {
 		if k, v, ok := strings.Cut(tok, "="); ok && isAlphaKey(k) && v != "" {
@@ -52,21 +64,30 @@ func Parse(text string) (Command, error) {
 	parseID := func(s string) (int64, error) {
 		id, err := strconv.ParseInt(strings.TrimPrefix(s, "#"), 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("%q is not a market id", s)
+			return 0, fmt.Errorf("%q isn't a market number — see `/casino board`", s)
 		}
 		return id, nil
 	}
 
 	switch cmd.Name {
-	case "help", "board", "prs":
+	case "help", "board", "me", "prs":
 		return cmd, nil
+	case "show":
+		if err := need(1, "show <market#>"); err != nil {
+			return cmd, err
+		}
+		id, err := parseID(plain[0])
+		if err != nil {
+			return cmd, err
+		}
+		cmd.MarketID = id
 	case "fund":
 		if err := need(2, "fund <#pr|ext:KEY> <amount>"); err != nil {
 			return cmd, err
 		}
 		cmd.Context, cmd.Amount = plain[0], plain[1]
 	case "market":
-		if err := need(2, "market <#pr|ext:KEY> <bounty|merge-by|findings-count> [deadline]"); err != nil {
+		if err := need(2, "open <#pr|ext:KEY> <bounty|merge-by|findings-count> [deadline]"); err != nil {
 			return cmd, err
 		}
 		cmd.Context, cmd.Kind = plain[0], strings.ToLower(plain[1])
@@ -74,7 +95,7 @@ func Parse(text string) (Command, error) {
 			cmd.Rest = plain[2]
 		}
 	case "bet":
-		if err := need(3, "bet <market-id> <outcome> <amount>"); err != nil {
+		if err := need(3, "bet <market#> <outcome> <amount>"); err != nil {
 			return cmd, err
 		}
 		id, err := parseID(plain[0])
@@ -83,7 +104,7 @@ func Parse(text string) (Command, error) {
 		}
 		cmd.MarketID, cmd.Outcome, cmd.Amount = id, plain[1], plain[2]
 	case "refund", "lock", "void":
-		if err := need(1, cmd.Name+" <market-id>"); err != nil {
+		if err := need(1, cmd.Name+" <market#>"); err != nil {
 			return cmd, err
 		}
 		id, err := parseID(plain[0])
@@ -95,7 +116,7 @@ func Parse(text string) (Command, error) {
 			cmd.Rest = strings.Join(plain[1:], " ")
 		}
 	case "resolve":
-		if err := need(2, "resolve <market-id> <outcome> [solver=<github-login>]"); err != nil {
+		if err := need(2, "resolve <market#> <outcome> [solver=<github-login>]"); err != nil {
 			return cmd, err
 		}
 		id, err := parseID(plain[0])
@@ -109,9 +130,30 @@ func Parse(text string) (Command, error) {
 		}
 		cmd.Rest = strings.TrimPrefix(plain[0], "@")
 	default:
-		return cmd, fmt.Errorf("unknown command %q — try `/casino help`", cmd.Name)
+		return cmd, fmt.Errorf("no such command `%s` — try `/casino help`", cmd.Name)
 	}
 	return cmd, nil
+}
+
+// ParseDeadline accepts a Go duration ("72h") or a date/RFC3339, returning the
+// stored RFC3339 form.
+func ParseDeadline(s string, now time.Time) (string, error) {
+	if s == "" {
+		return "", fmt.Errorf("merge-by needs a deadline, e.g. `72h` or `2026-07-10`")
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		if d <= 0 {
+			return "", fmt.Errorf("the deadline must be in the future")
+		}
+		return now.Add(d).UTC().Format(time.RFC3339), nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format(time.RFC3339), nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC().Format(time.RFC3339), nil
+	}
+	return "", fmt.Errorf("can't read deadline %q — use `72h`, `2026-07-10`, or RFC3339", s)
 }
 
 func isAlphaKey(s string) bool {
@@ -126,34 +168,18 @@ func isAlphaKey(s string) bool {
 	return true
 }
 
-// ParseDeadline accepts a duration ("72h", "3d" not supported — go durations)
-// or RFC3339, returning RFC3339 (the stored form).
-func ParseDeadline(s string, now time.Time) (string, error) {
-	if s == "" {
-		return "", fmt.Errorf("merge-by needs a deadline, e.g. 72h or 2026-07-10T00:00:00Z")
-	}
-	if d, err := time.ParseDuration(s); err == nil {
-		if d <= 0 {
-			return "", fmt.Errorf("deadline must be in the future")
-		}
-		return now.Add(d).UTC().Format(time.RFC3339), nil
-	}
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC().Format(time.RFC3339), nil
-	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		return t.UTC().Format(time.RFC3339), nil
-	}
-	return "", fmt.Errorf("can't parse deadline %q (use 72h, 2026-07-10, or RFC3339)", s)
-}
-
-const helpText = "🎰 *casino market* — stake USDC on questions about PRs\n" +
-	"`/casino fund #123 25` — bounty: pool pays the author on merge\n" +
-	"`/casino market #123 merge-by 72h` — open a merge-deadline market\n" +
-	"`/casino market #123 findings-count` — bet on the review's findings count\n" +
-	"`/casino bet 7 yes 10` — stake $10 on outcome *yes* of market 7\n" +
-	"`/casino board` — the ranked board\n" +
-	"`/casino prs` — PRs /casino-review has acted on\n" +
-	"`/casino refund 7` — withdraw your stake (while the market is open)\n" +
-	"`/casino link <github-login>` — link your GitHub identity\n" +
-	"admin: `/casino lock 7` · `/casino resolve 7 merged solver=<login>` · `/casino void 7`"
+const helpText = "🎰 *Welcome to the Casino* — stake USDC on what happens to pull requests.\n\n" +
+	"*See what's live*\n" +
+	"• `/casino board` — open markets & where the money is\n" +
+	"• `/casino show 7` — one market's odds + your position\n" +
+	"• `/casino me` — your open bets\n\n" +
+	"*Put money down*\n" +
+	"• `/casino fund #123 25` — 💰 *bounty*: the whole pool pays the PR author when it merges\n" +
+	"• `/casino open #123 merge-by 72h` — 📅 will it merge in time? (yes / no)\n" +
+	"• `/casino open #123 findings-count` — 🔎 how many findings will the review post?\n" +
+	"• `/casino bet 7 yes 10` — 🎲 stake $10 on outcome *yes* of market 7\n" +
+	"• `/casino refund 7` — ↩️ pull your stake back (while the market's open)\n\n" +
+	"*You*\n" +
+	"• `/casino link octocat` — link your GitHub login so bounties can pay you\n" +
+	"• `/casino prs` — PRs the casino has reviewed\n\n" +
+	"_Amounts accept `$` and decimals (`$10.50`). Admins settle markets with `lock` · `resolve` · `void`._"
