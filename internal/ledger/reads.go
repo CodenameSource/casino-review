@@ -2,6 +2,26 @@ package ledger
 
 import "context"
 
+// MarketsForContext returns every non-voided market attached to a context ref
+// (a PR or ext: key), newest first — the data behind a PR's market dashboard.
+func (l *Ledger) MarketsForContext(ctx context.Context, contextRef string) ([]Market, error) {
+	rows, err := l.st.Pool.Query(ctx, marketSelect+
+		` WHERE context_ref=$1 AND state <> 'VOIDED' ORDER BY created_at DESC`, contextRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Market
+	for rows.Next() {
+		m, err := scanMarket(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // OutcomePools returns the active pool staked on each outcome of a market.
 func (l *Ledger) OutcomePools(ctx context.Context, marketID int64) (map[string]USDC, error) {
 	rows, err := l.st.Pool.Query(ctx,

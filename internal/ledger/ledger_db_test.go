@@ -211,3 +211,65 @@ func TestLedgerConcurrentRefund(t *testing.T) {
 		t.Fatalf("concurrent refund: %d succeeded, want exactly 1", got)
 	}
 }
+
+// TestLiveMarketUniqueness verifies the "one live market per (kind, context)"
+// rule that context-first addressing ("#123 merge-by") depends on.
+func TestLiveMarketUniqueness(t *testing.T) {
+	st := openTestStore(t)
+	l := New(st)
+	ctx := context.Background()
+	ref := fmt.Sprintf("ext:UNIQ-%d", time.Now().UnixNano())
+
+	m1, err := l.CreateMarket(ctx, Market{
+		Kind: "merge-by", ContextRef: ref, Question: "q1",
+		Outcomes: []string{"yes", "no"}, CreatedBy: "cli:test",
+	})
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	// A second live market of the same kind on the same context is rejected.
+	if _, err := l.CreateMarket(ctx, Market{
+		Kind: "merge-by", ContextRef: ref, Question: "q2",
+		Outcomes: []string{"yes", "no"}, CreatedBy: "cli:test",
+	}); err == nil {
+		t.Fatal("expected a duplicate live merge-by market to be rejected")
+	}
+
+	// LiveMarket resolves (context, kind) to that one market.
+	got, err := l.LiveMarket(ctx, ref, "merge-by")
+	if err != nil {
+		t.Fatalf("LiveMarket: %v", err)
+	}
+	if got.ID != m1.ID {
+		t.Fatalf("LiveMarket returned #%d, want #%d", got.ID, m1.ID)
+	}
+
+	// A different kind on the same context is independent — allowed.
+	if _, err := l.CreateMarket(ctx, Market{
+		Kind: "findings-count", ContextRef: ref, Question: "q3",
+		Outcomes: []string{"0", "1-2"}, CreatedBy: "cli:test",
+	}); err != nil {
+		t.Fatalf("different kind on same context should be allowed: %v", err)
+	}
+
+	// Voiding frees the slot: a fresh live market of that kind can be created.
+	if _, err := l.Void(ctx, m1.ID, "cli:test", "cleanup"); err != nil {
+		t.Fatalf("void: %v", err)
+	}
+	if _, err := l.CreateMarket(ctx, Market{
+		Kind: "merge-by", ContextRef: ref, Question: "q4",
+		Outcomes: []string{"yes", "no"}, CreatedBy: "cli:test",
+	}); err != nil {
+		t.Fatalf("recreate after void should be allowed: %v", err)
+	}
+
+	// MarketsForContext returns the non-voided markets on the context.
+	ms, err := l.MarketsForContext(ctx, ref)
+	if err != nil {
+		t.Fatalf("MarketsForContext: %v", err)
+	}
+	if len(ms) != 2 { // the findings-count + the recreated merge-by; the voided one is excluded
+		t.Fatalf("MarketsForContext returned %d markets, want 2", len(ms))
+	}
+}

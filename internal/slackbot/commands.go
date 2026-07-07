@@ -72,20 +72,28 @@ func Parse(text string) (Command, error) {
 	switch cmd.Name {
 	case "help", "board", "me", "prs":
 		return cmd, nil
+
 	case "show":
-		if err := need(1, "show <market#>"); err != nil {
+		// show <#pr|ext:KEY> → the PR's market dashboard;  show <market#> → one market.
+		if err := need(1, "show <#pr|market#>"); err != nil {
 			return cmd, err
 		}
-		id, err := parseID(plain[0])
-		if err != nil {
-			return cmd, err
+		if isContextRef(plain[0]) {
+			cmd.Context = plain[0]
+		} else {
+			id, err := parseID(plain[0])
+			if err != nil {
+				return cmd, err
+			}
+			cmd.MarketID = id
 		}
-		cmd.MarketID = id
+
 	case "fund":
 		if err := need(2, "fund <#pr|ext:KEY> <amount>"); err != nil {
 			return cmd, err
 		}
 		cmd.Context, cmd.Amount = plain[0], plain[1]
+
 	case "market":
 		if err := need(2, "open <#pr|ext:KEY> <bounty|merge-by|findings-count> [deadline]"); err != nil {
 			return cmd, err
@@ -94,45 +102,87 @@ func Parse(text string) (Command, error) {
 		if len(plain) > 2 {
 			cmd.Rest = plain[2]
 		}
+
 	case "bet":
-		if err := need(3, "bet <market#> <outcome> <amount>"); err != nil {
-			return cmd, err
+		// context form: bet <#pr> <kind> <outcome> <amount>
+		// id form:      bet <market#> <outcome> <amount>
+		if len(plain) > 0 && isContextRef(plain[0]) {
+			if err := need(4, "bet <#pr> <kind> <outcome> <amount>"); err != nil {
+				return cmd, err
+			}
+			cmd.Context, cmd.Kind, cmd.Outcome, cmd.Amount = plain[0], strings.ToLower(plain[1]), plain[2], plain[3]
+		} else {
+			if err := need(3, "bet <#pr> <kind> <outcome> <amount>"); err != nil {
+				return cmd, err
+			}
+			id, err := parseID(plain[0])
+			if err != nil {
+				return cmd, err
+			}
+			cmd.MarketID, cmd.Outcome, cmd.Amount = id, plain[1], plain[2]
 		}
-		id, err := parseID(plain[0])
-		if err != nil {
-			return cmd, err
-		}
-		cmd.MarketID, cmd.Outcome, cmd.Amount = id, plain[1], plain[2]
+
 	case "refund", "lock", "void":
-		if err := need(1, cmd.Name+" <market#>"); err != nil {
-			return cmd, err
+		// context form: <verb> <#pr> <kind> [reason]
+		// id form:      <verb> <market#> [reason]
+		if len(plain) > 0 && isContextRef(plain[0]) {
+			if err := need(2, cmd.Name+" <#pr> <kind>"); err != nil {
+				return cmd, err
+			}
+			cmd.Context, cmd.Kind = plain[0], strings.ToLower(plain[1])
+			if len(plain) > 2 {
+				cmd.Rest = strings.Join(plain[2:], " ")
+			}
+		} else {
+			if err := need(1, cmd.Name+" <#pr> <kind>"); err != nil {
+				return cmd, err
+			}
+			id, err := parseID(plain[0])
+			if err != nil {
+				return cmd, err
+			}
+			cmd.MarketID = id
+			if len(plain) > 1 {
+				cmd.Rest = strings.Join(plain[1:], " ")
+			}
 		}
-		id, err := parseID(plain[0])
-		if err != nil {
-			return cmd, err
-		}
-		cmd.MarketID = id
-		if len(plain) > 1 {
-			cmd.Rest = strings.Join(plain[1:], " ")
-		}
+
 	case "resolve":
-		if err := need(2, "resolve <market#> <outcome> [solver=<github-login>]"); err != nil {
-			return cmd, err
+		// context form: resolve <#pr> <kind> <outcome>
+		// id form:      resolve <market#> <outcome>
+		if len(plain) > 0 && isContextRef(plain[0]) {
+			if err := need(3, "resolve <#pr> <kind> <outcome> [solver=<github-login>]"); err != nil {
+				return cmd, err
+			}
+			cmd.Context, cmd.Kind, cmd.Outcome = plain[0], strings.ToLower(plain[1]), plain[2]
+		} else {
+			if err := need(2, "resolve <#pr> <kind> <outcome> [solver=<github-login>]"); err != nil {
+				return cmd, err
+			}
+			id, err := parseID(plain[0])
+			if err != nil {
+				return cmd, err
+			}
+			cmd.MarketID, cmd.Outcome = id, plain[1]
 		}
-		id, err := parseID(plain[0])
-		if err != nil {
-			return cmd, err
-		}
-		cmd.MarketID, cmd.Outcome = id, plain[1]
+
 	case "link":
 		if err := need(1, "link <github-login>"); err != nil {
 			return cmd, err
 		}
 		cmd.Rest = strings.TrimPrefix(plain[0], "@")
+
 	default:
 		return cmd, fmt.Errorf("no such command `%s` — try `/casino help`", cmd.Name)
 	}
 	return cmd, nil
+}
+
+// isContextRef reports whether a token names a context (a PR or ext: key) rather
+// than a bare market serial. "#123", "ext:KEY", "pr:o/r#1", "o/r#5" are context
+// refs; a plain number ("7") is a market id (the hidden fallback address).
+func isContextRef(s string) bool {
+	return strings.HasPrefix(s, "#") || strings.ContainsAny(s, ":/")
 }
 
 // ParseDeadline accepts a Go duration ("72h") or a date/RFC3339, returning the
@@ -168,17 +218,19 @@ func isAlphaKey(s string) bool {
 	return true
 }
 
-const helpText = "🎰 *Welcome to the Casino* — stake USDC on what happens to pull requests.\n\n" +
+const helpText = "🎰 *Welcome to the Casino* — stake USDC on what happens to pull requests.\n" +
+	"Everything is addressed by the *PR* — you never need a market number.\n\n" +
 	"*See what's live*\n" +
-	"• `/casino board` — open markets & where the money is\n" +
-	"• `/casino show 7` — one market's odds + your position\n" +
+	"• `/casino board` — open markets & where the money is (tap 🎲 to bet)\n" +
+	"• `/casino show #123` — every market on PR #123: odds + your position\n" +
 	"• `/casino me` — your open bets\n\n" +
 	"*Put money down*\n" +
 	"• `/casino fund #123 25` — 💰 *bounty*: the whole pool pays the PR author when it merges\n" +
 	"• `/casino open #123 merge-by 72h` — 📅 will it merge in time? (yes / no)\n" +
 	"• `/casino open #123 findings-count` — 🔎 how many findings will the review post?\n" +
-	"• `/casino bet 7 yes 10` — 🎲 stake $10 on outcome *yes* of market 7\n" +
-	"• `/casino refund 7` — ↩️ pull your stake back (while the market's open)\n\n" +
+	"• `/casino bet #123 merge-by yes 10` — 🎲 stake $10 on *yes* of #123's merge-by\n" +
+	"• `/casino refund #123 merge-by` — ↩️ pull your stake back (while it's open)\n\n" +
+	"_Tip: tap 🎲 *Bet* / 📊 *Details* on the board instead of typing._\n\n" +
 	"*You*\n" +
 	"• `/casino link octocat` — link your GitHub login so bounties can pay you\n" +
 	"• `/casino prs` — PRs the casino has reviewed\n\n" +

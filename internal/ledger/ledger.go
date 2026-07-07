@@ -154,8 +154,15 @@ func (l *Ledger) FindOrCreateBounty(ctx context.Context, contextRef, question, c
 }
 
 func (l *Ledger) liveBounty(ctx context.Context, contextRef string) (Market, error) {
+	return l.LiveMarket(ctx, contextRef, "bounty")
+}
+
+// LiveMarket returns the single OPEN/LOCKED market for a (context, kind), or
+// ErrNotFound. The markets_live_unique index guarantees at most one, so this is
+// how context-first addressing ("#123 merge-by") resolves to a market.
+func (l *Ledger) LiveMarket(ctx context.Context, contextRef, kind string) (Market, error) {
 	row := l.st.Pool.QueryRow(ctx, marketSelect+
-		` WHERE kind='bounty' AND context_ref=$1 AND state IN ('OPEN','LOCKED')`, contextRef)
+		` WHERE kind=$1 AND context_ref=$2 AND state IN ('OPEN','LOCKED')`, kind, contextRef)
 	return scanMarket(row)
 }
 

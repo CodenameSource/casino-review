@@ -76,6 +76,22 @@ func (b *Bot) eventLoop(ctx context.Context) {
 				// Ack immediately (Slack gives 3s); reply async.
 				b.sock.Ack(*evt.Request)
 				go b.handleSlash(ctx, cmd)
+			case socketmode.EventTypeInteractive:
+				cb, ok := evt.Data.(slack.InteractionCallback)
+				if !ok {
+					continue
+				}
+				switch cb.Type {
+				case slack.InteractionTypeBlockActions:
+					// Button clicks: ack now, act async (opening a modal still
+					// beats the 3s window off the ack'd trigger_id).
+					b.sock.Ack(*evt.Request)
+					go b.handleBlockAction(ctx, cb)
+				case slack.InteractionTypeViewSubmission:
+					// Modal submit: the ack payload carries validation errors or
+					// closes the dialog, so it must run before the ack.
+					b.handleViewSubmission(ctx, cb, evt.Request)
+				}
 			case socketmode.EventTypeConnectionError:
 				log.Printf("slackbot: connection error: %v", evt.Data)
 			}
@@ -95,155 +111,328 @@ func (b *Bot) handleSlash(ctx context.Context, sc slack.SlashCommand) {
 	ctx = ledger.WithVia(ctx, "slack")
 	b.tel.Track(participant, "slack_command", map[string]any{"text": firstWord(sc.Text)})
 
-	reply, ephemeral := b.execute(ctx, sc, participant)
-	if reply == "" {
+	r := b.execute(ctx, sc, participant)
+	if r.text == "" && len(r.blocks) == 0 {
 		return
 	}
-	if ephemeral {
-		b.ephemeral(sc, reply)
-	} else {
-		if _, _, err := b.api.PostMessage(b.channelID, slack.MsgOptionText(reply, false)); err != nil {
-			log.Printf("slackbot: post: %v", err)
+	b.send(sc, r)
+}
+
+// reply is a command result: either text or Block Kit blocks, posted in-channel
+// (public market activity) or ephemerally (help, errors, personal views).
+type reply struct {
+	text      string
+	blocks    []slack.Block
+	ephemeral bool
+}
+
+func (b *Bot) send(sc slack.SlashCommand, r reply) {
+	opt := slack.MsgOptionText(r.text, false)
+	if len(r.blocks) > 0 {
+		opt = slack.MsgOptionBlocks(r.blocks...)
+	}
+	if r.ephemeral {
+		if _, err := b.api.PostEphemeral(sc.ChannelID, sc.UserID, opt); err != nil {
+			log.Printf("slackbot: ephemeral: %v", err)
 		}
+		return
+	}
+	if _, _, err := b.api.PostMessage(b.channelID, opt); err != nil {
+		log.Printf("slackbot: post: %v", err)
 	}
 }
 
-// execute runs a parsed command; returns the reply and whether it should be
-// ephemeral (errors/help) instead of in-channel (market activity is public).
-func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant string) (string, bool) {
+// execute runs a parsed command and returns a reply. Money verbs address their
+// market context-first (`bet #123 merge-by …`), resolved to an id via MarketFor;
+// a bare market number still works as a fallback.
+func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant string) reply {
 	cmd, err := Parse(sc.Text)
 	if err != nil {
-		return "⚠️ " + err.Error(), true
+		return reply{text: "⚠️ " + err.Error(), ephemeral: true}
+	}
+	emsg := func(s string) reply { return reply{text: s, ephemeral: true} }
+	errf := func(err error) reply { return emsg("⚠️ " + err.Error()) }
+	pub := func(s string) reply { return reply{text: s} }
+
+	// resolveID turns a context+kind command into a market id, or uses the
+	// explicit id fallback. Every money verb goes through this.
+	resolveID := func() (int64, error) {
+		if cmd.Context != "" {
+			m, err := b.svc.MarketFor(ctx, cmd.Context, cmd.Kind)
+			if err != nil {
+				return 0, err
+			}
+			return m.ID, nil
+		}
+		return cmd.MarketID, nil
 	}
 
 	switch cmd.Name {
 	case "help":
-		return helpText, true
+		return emsg(helpText)
 
 	case "board":
-		rows, err := b.svc.Board(ctx, 15)
+		ds, err := b.svc.BoardDetails(ctx, 15)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
-		return renderBoard(rows), false
+		return reply{blocks: boardBlocks(ds)}
 
 	case "show":
+		if cmd.Context != "" {
+			ref, ds, err := b.svc.PRMarkets(ctx, cmd.Context, participant)
+			if err != nil {
+				return errf(err)
+			}
+			return reply{blocks: prDashboardBlocks(ref, ds), ephemeral: true}
+		}
 		d, err := b.svc.Detail(ctx, cmd.MarketID, participant)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
-		return renderMarketDetail(d), true
+		return reply{blocks: marketDetailBlocks(d), ephemeral: true}
 
 	case "me":
 		positions, err := b.svc.MyPositions(ctx, participant)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
 		login, _ := b.st.GithubLogin(ctx, sc.UserID)
-		return renderMyPositions(positions, login), true
+		return emsg(renderMyPositions(positions, login))
 
 	case "prs":
 		prs, err := b.st.TrackedPRs(ctx, b.cfg.RepoSlug(), 15)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
 		pending, _ := b.st.PendingSpins(ctx)
-		return renderPRs(b.cfg.RepoSlug(), prs, pending), true // ephemeral: a status query, not channel activity
+		return emsg(renderPRs(b.cfg.RepoSlug(), prs, pending))
 
 	case "fund":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
 		m, err := b.svc.Fund(ctx, cmd.Context, participant, amt)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
 		_, pool, _ := b.svc.Get(ctx, m.ID)
-		return fmt.Sprintf("💰 <@%s> funded %s → *#%d* `%s` · pool now *%s*  ·  `/casino show %d`",
-			sc.UserID, amt, m.ID, m.ContextRef, pool, m.ID), false
+		return pub(fmt.Sprintf("💰 <@%s> funded %s → 💰 bounty on `%s` · pool now *%s*  ·  `/casino show %s`",
+			sc.UserID, amt, m.ContextRef, pool, m.ContextRef))
 
 	case "market":
 		spec := map[string]any{}
 		if cmd.Kind == "merge-by" {
 			deadline, err := ParseDeadline(cmd.Rest, time.Now())
 			if err != nil {
-				return "⚠️ " + err.Error(), true
+				return errf(err)
 			}
 			spec["deadline"] = deadline
 		}
 		m, err := b.svc.Create(ctx, cmd.Kind, cmd.Context, participant, spec)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
-		return fmt.Sprintf("🆕 Market *#%d* — %s %s\n_%s_\nOutcomes: `%s`\n🎲 `/casino bet %d <outcome> <amount>`",
-			m.ID, kindEmoji(m.Kind), m.Kind, m.Question, strings.Join(m.Outcomes, "` `"), m.ID), false
+		return pub(fmt.Sprintf("🆕 %s *%s* market open on `%s`\n_%s_\nOutcomes: `%s`\n🎲 `/casino bet %s %s <outcome> <amount>`  ·  or `/casino show %s` to tap a button",
+			kindEmoji(m.Kind), m.Kind, m.ContextRef, m.Question, strings.Join(m.Outcomes, "` `"), m.ContextRef, m.Kind, m.ContextRef))
 
 	case "bet":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
-		if err := b.svc.Bet(ctx, cmd.MarketID, participant, cmd.Outcome, amt); err != nil {
-			return "⚠️ " + err.Error(), true
+		id, err := resolveID()
+		if err != nil {
+			return errf(err)
 		}
-		_, pool, _ := b.svc.Get(ctx, cmd.MarketID)
-		return fmt.Sprintf("🎲 <@%s> put %s on *%s* (*#%d*) · pool now *%s*  ·  `/casino show %d`",
-			sc.UserID, amt, cmd.Outcome, cmd.MarketID, pool, cmd.MarketID), false
+		if err := b.svc.Bet(ctx, id, participant, cmd.Outcome, amt); err != nil {
+			return errf(err)
+		}
+		m, pool, _ := b.svc.Get(ctx, id)
+		return pub(fmt.Sprintf("🎲 <@%s> put %s on *%s* (%s %s on `%s`) · pool now *%s*",
+			sc.UserID, amt, cmd.Outcome, kindEmoji(m.Kind), m.Kind, m.ContextRef, pool))
 
 	case "refund":
-		amt, err := b.svc.Refund(ctx, cmd.MarketID, participant)
+		id, err := resolveID()
 		if err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
-		return fmt.Sprintf("↩️ <@%s> withdrew %s from market #%d", sc.UserID, amt, cmd.MarketID), false
+		m, _, _ := b.svc.Get(ctx, id)
+		amt, err := b.svc.Refund(ctx, id, participant)
+		if err != nil {
+			return errf(err)
+		}
+		return pub(fmt.Sprintf("↩️ <@%s> withdrew %s from %s market on `%s`", sc.UserID, amt, m.Kind, m.ContextRef))
 
 	case "link":
 		if err := b.st.LinkIdentity(ctx, sc.UserID, cmd.Rest); err != nil {
-			return "⚠️ " + err.Error(), true
+			return errf(err)
 		}
 		// Public on purpose: identity claims route payouts, so the channel
 		// should see them happen.
-		return fmt.Sprintf("🔗 Linked <@%s> ↔ github:%s", sc.UserID, cmd.Rest), false
+		return pub(fmt.Sprintf("🔗 Linked <@%s> ↔ github:%s", sc.UserID, cmd.Rest))
 
 	case "lock", "resolve", "void":
 		// MONEY AUTHORIZATION: settling verbs move other people's stakes, so
 		// they are restricted to the configured admin allowlist. With no
 		// admins configured the verbs are disabled in Slack entirely (the CLI
 		// on the host remains the admin path). Without this gate, any channel
-		// member could `/casino resolve <id> merged solver=<their-login>` and
-		// pay themselves the pool.
+		// member could resolve a market to an outcome that pays themselves.
 		if !b.isAdmin(sc.UserID) {
-			return "⛔ Only casino admins can lock/resolve/void markets (set SLACK_ADMINS).", true
+			return emsg("⛔ Only casino admins can lock/resolve/void markets (set SLACK_ADMINS).")
 		}
+		id, err := resolveID()
+		if err != nil {
+			return errf(err)
+		}
+		m, _, _ := b.svc.Get(ctx, id)
 		switch cmd.Name {
 		case "lock":
-			if err := b.svc.Lock(ctx, cmd.MarketID, participant); err != nil {
-				return "⚠️ " + err.Error(), true
+			if err := b.svc.Lock(ctx, id, participant); err != nil {
+				return errf(err)
 			}
-			return fmt.Sprintf("🔒 Market #%d locked — no more bets.", cmd.MarketID), false
+			return pub(fmt.Sprintf("🔒 %s market on `%s` locked — no more bets.", m.Kind, m.ContextRef))
 
 		case "resolve":
 			solver := strings.TrimPrefix(cmd.Args["solver"], "@")
 			if solver != "" {
 				solver = "github:" + strings.TrimPrefix(solver, "github:")
 			}
-			payouts, err := b.svc.Resolve(ctx, cmd.MarketID, cmd.Outcome, solver, participant,
+			payouts, err := b.svc.Resolve(ctx, id, cmd.Outcome, solver, participant,
 				map[string]any{"resolved_via": "slack-admin"})
 			if err != nil {
-				return "⚠️ " + err.Error(), true
+				return errf(err)
 			}
-			return fmt.Sprintf("🏁 Market #%d resolved: *%s*\n%s", cmd.MarketID, cmd.Outcome, renderPayouts(payouts)), false
+			return pub(fmt.Sprintf("🏁 %s market on `%s` resolved: *%s*\n%s", m.Kind, m.ContextRef, cmd.Outcome, renderPayouts(payouts)))
 
 		default: // void
-			refunds, err := b.svc.Void(ctx, cmd.MarketID, participant, cmd.Rest)
+			refunds, err := b.svc.Void(ctx, id, participant, cmd.Rest)
 			if err != nil {
-				return "⚠️ " + err.Error(), true
+				return errf(err)
 			}
-			return fmt.Sprintf("🚫 Market #%d voided — %d stake(s) refunded.", cmd.MarketID, len(refunds)), false
+			return pub(fmt.Sprintf("🚫 %s market on `%s` voided — %d stake(s) refunded.", m.Kind, m.ContextRef, len(refunds)))
 		}
 	}
-	return "⚠️ unhandled command", true
+	return emsg("⚠️ unhandled command")
+}
+
+// handleBlockAction routes a board/detail button click. Button values carry the
+// market id, so a click is unambiguous without the user typing anything.
+func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallback) {
+	if len(cb.ActionCallback.BlockActions) == 0 {
+		return
+	}
+	if cb.Channel.ID != "" && cb.Channel.ID != b.channelID {
+		return
+	}
+	ba := cb.ActionCallback.BlockActions[0]
+	participant := "slack:" + cb.User.ID
+	ctx = ledger.WithVia(ctx, "slack")
+	id, err := strconv.ParseInt(ba.Value, 10, 64)
+	if err != nil {
+		return
+	}
+	switch ba.ActionID {
+	case actBet:
+		m, _, err := b.svc.Get(ctx, id)
+		if err != nil {
+			b.ephemUser(cb.User.ID, "⚠️ "+err.Error())
+			return
+		}
+		if m.State != ledger.StateOpen {
+			b.ephemUser(cb.User.ID, fmt.Sprintf("🔒 That market is %s — no more bets.", strings.ToLower(m.State)))
+			return
+		}
+		if _, err := b.api.OpenView(cb.TriggerID, betModal(m)); err != nil {
+			log.Printf("slackbot: open view: %v", err)
+			b.ephemUser(cb.User.ID, "⚠️ couldn't open the bet dialog — try `/casino bet` instead.")
+		}
+	case actDetails:
+		d, err := b.svc.Detail(ctx, id, participant)
+		if err != nil {
+			b.ephemUser(cb.User.ID, "⚠️ "+err.Error())
+			return
+		}
+		if _, err := b.api.PostEphemeral(b.channelID, cb.User.ID, slack.MsgOptionBlocks(marketDetailBlocks(d)...)); err != nil {
+			log.Printf("slackbot: ephemeral: %v", err)
+		}
+	case actRefund:
+		m, _, _ := b.svc.Get(ctx, id)
+		amt, err := b.svc.Refund(ctx, id, participant)
+		if err != nil {
+			b.ephemUser(cb.User.ID, "⚠️ "+err.Error())
+			return
+		}
+		b.tel.Track(participant, "slack_button", map[string]any{"action": "refund"})
+		b.postChannel(fmt.Sprintf("↩️ <@%s> withdrew %s from %s market on `%s`", cb.User.ID, amt, m.Kind, m.ContextRef))
+	}
+}
+
+// handleViewSubmission places a bet from the modal. Validation problems are
+// returned as inline modal errors (response_action: errors) so the dialog stays
+// open; success acks (closes the modal) and posts the bet to the channel.
+func (b *Bot) handleViewSubmission(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
+	if cb.View.CallbackID != cbBetModal {
+		b.sock.Ack(*req)
+		return
+	}
+	participant := "slack:" + cb.User.ID
+	ctx = ledger.WithVia(ctx, "slack")
+	id, err := strconv.ParseInt(cb.View.PrivateMetadata, 10, 64)
+	if err != nil {
+		b.sock.Ack(*req)
+		return
+	}
+	vals := cb.View.State.Values
+	amt, err := ledger.ParseUSDC(vals[blkAmount][actAmount].Value)
+	if err != nil {
+		b.ackViewErr(req, blkAmount, err.Error())
+		return
+	}
+	m, _, err := b.svc.Get(ctx, id)
+	if err != nil {
+		b.ackViewErr(req, blkAmount, err.Error())
+		return
+	}
+	outcome := "merged"
+	if m.Kind != "bounty" {
+		outcome = vals[blkOutcome][actOutcome].SelectedOption.Value
+		if outcome == "" {
+			b.ackViewErr(req, blkOutcome, "pick an outcome")
+			return
+		}
+	}
+	if err := b.svc.Bet(ctx, id, participant, outcome, amt); err != nil {
+		b.ackViewErr(req, blkAmount, err.Error())
+		return
+	}
+	b.sock.Ack(*req) // close the modal
+	b.tel.Track(participant, "slack_button", map[string]any{"action": "bet"})
+	_, pool, _ := b.svc.Get(ctx, id)
+	b.postChannel(fmt.Sprintf("🎲 <@%s> put %s on *%s* (%s %s on `%s`) · pool now *%s*",
+		cb.User.ID, amt, outcome, kindEmoji(m.Kind), m.Kind, m.ContextRef, pool))
+}
+
+func (b *Bot) ackViewErr(req *socketmode.Request, block, msg string) {
+	if err := b.sock.Ack(*req, map[string]any{
+		"response_action": "errors",
+		"errors":          map[string]string{block: msg},
+	}); err != nil {
+		log.Printf("slackbot: ack view: %v", err)
+	}
+}
+
+func (b *Bot) postChannel(text string) {
+	if _, _, err := b.api.PostMessage(b.channelID, slack.MsgOptionText(text, false)); err != nil {
+		log.Printf("slackbot: post: %v", err)
+	}
+}
+
+func (b *Bot) ephemUser(userID, text string) {
+	if _, err := b.api.PostEphemeral(b.channelID, userID, slack.MsgOptionText(text, false)); err != nil {
+		log.Printf("slackbot: ephemeral: %v", err)
+	}
 }
 
 func (b *Bot) isAdmin(userID string) bool {
@@ -313,68 +502,6 @@ func kindEmoji(kind string) string {
 	return "🎯"
 }
 
-func renderBoard(rows []ledger.BoardRow) string {
-	if len(rows) == 0 {
-		return "🎰 *No markets open yet — be the first.*\n" +
-			"• `/casino fund #<pr> 25` — 💰 bounty the author on merge\n" +
-			"• `/casino open #<pr> merge-by 72h` — 📅 bet on the merge deadline\n" +
-			"`/casino help` for the full table."
-	}
-	var sb strings.Builder
-	sb.WriteString("🎰 *The Board* — where the money's at")
-	for _, r := range rows {
-		lock := ""
-		if r.Market.State == ledger.StateLocked {
-			lock = " 🔒"
-		}
-		fmt.Fprintf(&sb, "\n\n*#%d* `%s` · %s %s · *%s* · %d backer(s)%s\n_%s_  →  `/casino show %d`",
-			r.Market.ID, r.Market.ContextRef, kindEmoji(r.Market.Kind), r.Market.Kind,
-			r.Pool, r.Participants, lock, r.Market.Question, r.Market.ID)
-	}
-	return sb.String()
-}
-
-// renderMarketDetail is the `/casino show <id>` view: odds, your stake, and how
-// to act on it.
-func renderMarketDetail(d market.Detail) string {
-	m := d.Market
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Market #%d* — %s %s · [%s]\n_%s_\nPool *%s* · %d backer(s)\n",
-		m.ID, kindEmoji(m.Kind), m.Kind, m.State, m.Question, d.Pool, d.Backers)
-
-	if m.Kind == "bounty" {
-		if mine := d.MyStake["merged"]; mine > 0 {
-			fmt.Fprintf(&sb, "Your stake: *%s*\n", mine)
-		}
-		if m.State == ledger.StateOpen {
-			fmt.Fprintf(&sb, "\n💰 Add to the bounty: `/casino fund %s <amount>`", m.ContextRef)
-		}
-		return sb.String()
-	}
-
-	sb.WriteString("\n")
-	for _, o := range market.Odds(m.Outcomes, d.OutcomePools) {
-		payout := "—"
-		if o.PayoutX > 0 {
-			payout = fmt.Sprintf("~%.2f×", o.PayoutX)
-		}
-		fmt.Fprintf(&sb, "`%-10s` %s  (%d%%) · win pays %s\n", o.Outcome, o.Pool, int(o.Prob*100+0.5), payout)
-	}
-	var mine []string
-	for _, o := range m.Outcomes {
-		if v := d.MyStake[o]; v > 0 {
-			mine = append(mine, fmt.Sprintf("*%s* %s", o, v))
-		}
-	}
-	if len(mine) > 0 {
-		fmt.Fprintf(&sb, "\nYour stake: %s\n", strings.Join(mine, ", "))
-	}
-	if m.State == ledger.StateOpen {
-		fmt.Fprintf(&sb, "\n🎲 `/casino bet %d <outcome> <amount>`  ·  ↩️ `/casino refund %d`", m.ID, m.ID)
-	}
-	return sb.String()
-}
-
 // renderMyPositions is the `/casino me` view.
 func renderMyPositions(ps []ledger.PositionView, githubLogin string) string {
 	id := "not linked — `/casino link <github-login>` so bounties can pay you"
@@ -396,8 +523,8 @@ func renderMyPositions(ps []ledger.PositionView, githubLogin string) string {
 		if p.MarketState == ledger.StateLocked {
 			lock = " 🔒"
 		}
-		fmt.Fprintf(&sb, "\n• *#%d* %s %s · %s%s · `%s`%s",
-			p.MarketID, kindEmoji(p.Kind), p.Kind, outcome, p.Amount, p.ContextRef, lock)
+		fmt.Fprintf(&sb, "\n• %s *%s* on `%s` · %s%s%s",
+			kindEmoji(p.Kind), p.Kind, p.ContextRef, outcome, p.Amount, lock)
 		total += p.Amount
 	}
 	fmt.Fprintf(&sb, "\nTotal staked: *%s*", total)

@@ -2,6 +2,7 @@ package market
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,6 +34,14 @@ func (s *Service) Create(ctx context.Context, kindName, ctxInput, participant st
 	if err != nil {
 		return ledger.Market{}, err
 	}
+	// Find-or-create: one live market per (context, kind) — a second `open`/`fund`
+	// on the same PR returns the existing market instead of a duplicate, so
+	// "#123 merge-by" always names exactly one thing.
+	if m, err := s.led.LiveMarket(ctx, ref, kindName); err == nil {
+		return m, nil
+	} else if !errors.Is(err, ledger.ErrNotFound) {
+		return ledger.Market{}, err
+	}
 	if spec == nil {
 		spec = map[string]any{}
 	}
@@ -56,10 +65,54 @@ func (s *Service) Create(ctx context.Context, kindName, ctxInput, participant st
 	}
 	created, err := s.led.CreateMarket(ctx, m)
 	if err != nil {
+		// Lost a creation race: the winner's live market is the market.
+		if m2, err2 := s.led.LiveMarket(ctx, ref, kindName); err2 == nil {
+			return m2, nil
+		}
 		return ledger.Market{}, err
 	}
 	s.tel.Track(participant, "market_created", map[string]any{"kind": kindName, "context": ref})
 	return created, nil
+}
+
+// MarketFor resolves a user's context input + kind (e.g. "#123", "merge-by") to
+// the single live market, with an actionable error when none exists. This is
+// how context-first commands (`bet #123 merge-by …`) find their market.
+func (s *Service) MarketFor(ctx context.Context, ctxInput, kind string) (ledger.Market, error) {
+	if _, ok := Kinds[kind]; !ok {
+		return ledger.Market{}, fmt.Errorf("unknown market kind %q (have: bounty, merge-by, findings-count)", kind)
+	}
+	ref, err := ParseContextRef(ctxInput, s.cfg.Owner, s.cfg.Repo)
+	if err != nil {
+		return ledger.Market{}, err
+	}
+	m, err := s.led.LiveMarket(ctx, ref, kind)
+	if errors.Is(err, ledger.ErrNotFound) {
+		return ledger.Market{}, fmt.Errorf("no open %s market on %s — start one with `/casino open %s %s`", kind, ref, ctxInput, kind)
+	}
+	return m, err
+}
+
+// PRMarkets returns the normalized context ref and every non-voided market on
+// it (with the caller's stakes) — the data behind `/casino show #123`.
+func (s *Service) PRMarkets(ctx context.Context, ctxInput, participant string) (string, []Detail, error) {
+	ref, err := ParseContextRef(ctxInput, s.cfg.Owner, s.cfg.Repo)
+	if err != nil {
+		return "", nil, err
+	}
+	ms, err := s.led.MarketsForContext(ctx, ref)
+	if err != nil {
+		return "", nil, err
+	}
+	out := make([]Detail, 0, len(ms))
+	for _, m := range ms {
+		d, err := s.Detail(ctx, m.ID, participant)
+		if err != nil {
+			return "", nil, err
+		}
+		out = append(out, d)
+	}
+	return ref, out, nil
 }
 
 // Fund is bounty sugar: find-or-create the bounty for the context and stake on it.
@@ -122,6 +175,24 @@ func (s *Service) Void(ctx context.Context, marketID int64, actor, reason string
 
 func (s *Service) Board(ctx context.Context, limit int) ([]ledger.BoardRow, error) {
 	return s.led.Board(ctx, limit)
+}
+
+// BoardDetails is the board enriched with per-outcome pools so each row can show
+// live odds. No participant stakes (the board is a shared, in-channel view).
+func (s *Service) BoardDetails(ctx context.Context, limit int) ([]Detail, error) {
+	rows, err := s.led.Board(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Detail, 0, len(rows))
+	for _, r := range rows {
+		pools, err := s.led.OutcomePools(ctx, r.Market.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Detail{Market: r.Market, Pool: r.Pool, Backers: r.Participants, OutcomePools: pools})
+	}
+	return out, nil
 }
 
 func (s *Service) Get(ctx context.Context, id int64) (ledger.Market, ledger.USDC, error) {
