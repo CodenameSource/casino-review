@@ -58,7 +58,7 @@ func Parse(text string) (Command, error) {
 	}
 
 	switch cmd.Name {
-	case "help", "board":
+	case "help", "board", "prs":
 		return cmd, nil
 	case "fund":
 		if err := need(2, "fund <#pr|ext:KEY> <amount>"); err != nil {
@@ -153,6 +153,7 @@ const helpText = "🎰 *casino market* — stake USDC on questions about PRs\n" 
 	"`/casino market #123 findings-count` — bet on the review's findings count\n" +
 	"`/casino bet 7 yes 10` — stake $10 on outcome *yes* of market 7\n" +
 	"`/casino board` — the ranked board\n" +
+	"`/casino prs` — PRs /casino-review has acted on\n" +
 	"`/casino refund 7` — withdraw your stake (while the market is open)\n" +
 	"`/casino link <github-login>` — link your GitHub identity\n" +
 	"admin: `/casino lock 7` · `/casino resolve 7 merged solver=<login>` · `/casino void 7`"

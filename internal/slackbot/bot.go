@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,6 +126,14 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 			return "⚠️ " + err.Error(), true
 		}
 		return renderBoard(rows), false
+
+	case "prs":
+		prs, err := b.st.TrackedPRs(ctx, b.cfg.RepoSlug(), 15)
+		if err != nil {
+			return "⚠️ " + err.Error(), true
+		}
+		pending, _ := b.st.PendingSpins(ctx)
+		return renderPRs(b.cfg.RepoSlug(), prs, pending), true // ephemeral: a status query, not channel activity
 
 	case "fund":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
@@ -291,6 +300,40 @@ func renderBoard(rows []ledger.BoardRow) string {
 		fmt.Fprintf(&sb, "%d. *#%d* %s — *%s* (%d backer(s))%s\n   _%s_ [%s]\n",
 			i+1, r.Market.ID, r.Market.ContextRef, r.Pool, r.Participants, state,
 			r.Market.Question, r.Market.Kind)
+	}
+	return sb.String()
+}
+
+func renderPRs(repo string, prs []store.TrackedPR, pending int) string {
+	if len(prs) == 0 {
+		msg := fmt.Sprintf("🎰 No PRs tracked yet for `%s`.", repo)
+		if pending > 0 {
+			msg += fmt.Sprintf(" (%d spin in flight)", pending)
+		}
+		return msg
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🎰 *Tracked PRs* — `%s`\n```\n", repo)
+	fmt.Fprintf(&sb, "%-6s %-5s %-16s %-8s %s\n", "PR", "spins", "last-engine", "findings", "last-run")
+	for _, p := range prs {
+		findings := "?"
+		if p.LastFindings != nil {
+			findings = strconv.Itoa(*p.LastFindings)
+		}
+		engine := p.LastEngine
+		if p.LastKind == "addon" {
+			engine += "(bonus)"
+		}
+		flag := ""
+		if p.LastError != "" {
+			flag = " ⚠️"
+		}
+		fmt.Fprintf(&sb, "#%-5d %-5d %-16s %-8s %s%s\n",
+			p.PR, p.Runs, engine, findings, p.LastAt.UTC().Format("01-02 15:04"), flag)
+	}
+	sb.WriteString("```")
+	if pending > 0 {
+		fmt.Fprintf(&sb, "\n_%d spin(s) in flight (review not posted yet)_", pending)
 	}
 	return sb.String()
 }
