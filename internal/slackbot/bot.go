@@ -42,6 +42,16 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.channelID = id
 	log.Printf("slackbot: honoring /casino only in channel %s", id)
 
+	// The bot must be IN the channel to reply and to post market activity —
+	// chat.postEphemeral/postMessage fail with not_in_channel otherwise. Try to
+	// self-join (works for public channels with the channels:join scope); on
+	// failure (private channel, or missing scope) tell the operator to invite.
+	if _, _, _, err := b.api.JoinConversationContext(ctx, id); err != nil {
+		log.Printf("slackbot: could not auto-join %s (%v) — INVITE THE BOT: run `/invite @<your-bot>` in that channel (private channels must be invited; public channels also need the channels:join scope to self-join)", id, err)
+	} else {
+		log.Printf("slackbot: joined channel %s", id)
+	}
+
 	go b.tail(ctx)
 	go b.eventLoop(ctx)
 	return b.sock.RunContext(ctx)
