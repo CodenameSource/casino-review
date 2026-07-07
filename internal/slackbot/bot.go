@@ -243,6 +243,9 @@ func (b *Bot) resolveChannel(ctx context.Context, ch string) (string, error) {
 			Cursor: cursor, Limit: 200, Types: []string{"public_channel", "private_channel"},
 		})
 		if err != nil {
+			if strings.Contains(err.Error(), "missing_scope") {
+				return "", fmt.Errorf("looking up channel by #name needs the bot token scope channels:read (and groups:read for private channels) — add them and reinstall, OR set SLACK_CHANNEL to the channel ID (C0…) to skip the lookup: %w", err)
+			}
 			return "", err
 		}
 		for _, c := range chans {

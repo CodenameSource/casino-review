@@ -3,6 +3,7 @@ package review
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -57,6 +58,23 @@ type Registry struct {
 // (e.g. "/casino-review"): no engine may collide with it, or the dispatch
 // comment the bot posts would re-trigger the bot itself, forever.
 func LoadRegistry(path string, legacyNames []string, trigger string) (*Registry, error) {
+	// A missing REVIEWS_FILE — or a *directory* at that path, the Docker
+	// bind-mount footgun when reviews.json wasn't created on the host before
+	// `up` — must not crash-loop the runner. Fall back to the legacy REVIEWS
+	// list (the dispatch reel) with a loud warning instead. A file that exists
+	// but is malformed is still a hard error: that's a real misconfiguration,
+	// not an unconfigured one.
+	if path != "" {
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			why := "does not exist"
+			if err == nil && info.IsDir() {
+				why = "is a directory (create reviews.json as a FILE on the host before `docker compose up`)"
+			}
+			log.Printf("reviews: REVIEWS_FILE %q %s — falling back to the REVIEWS list", path, why)
+			path = ""
+		}
+	}
+
 	var r *Registry
 	if path == "" {
 		r = &Registry{}

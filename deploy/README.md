@@ -37,6 +37,8 @@ git clone https://github.com/CodenameSource/casino-review.git ~/casino-review
 cd ~/casino-review
 cp .env.example .env            # fill GITHUB_TOKEN, GITHUB_REPO, POSTGRES_PASSWORD
 cp reviews.example.json reviews.json   # define your engine pool + the static addon
+                                # ^ MUST exist as a FILE before `up`, or Docker bind-mounts
+                                #   a new empty DIRECTORY over it and the runner can't read it.
 docker compose up -d --build    # (add swap first on a small box — see above)
 ```
 
