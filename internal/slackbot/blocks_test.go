@@ -1,6 +1,7 @@
 package slackbot
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -79,6 +80,24 @@ func TestBlockBuilders(t *testing.T) {
 		// row must not exceed Slack's 5-element limit.
 		assertActionBlocksValid(t, marketCard(d))
 		assertActionBlocksValid(t, marketDetailBlocks(d))
+	}
+
+	// A market with >10 outcomes must not use radio buttons (Slack caps them at
+	// 10) — betModal switches to a static select above that.
+	big := make([]string, 12)
+	for i := range big {
+		big[i] = strconv.Itoa(i)
+	}
+	bigModal := betModal(ledger.Market{ID: 9, Kind: "findings-count", ContextRef: "pr:o/r#9", Outcomes: big, State: ledger.StateOpen})
+	if len(bigModal.Blocks.BlockSet) == 0 {
+		t.Fatal("big-outcome bet modal empty")
+	}
+	for _, blk := range bigModal.Blocks.BlockSet {
+		if in, ok := blk.(*slack.InputBlock); ok {
+			if _, isRadio := in.Element.(*slack.RadioButtonsBlockElement); isRadio && len(big) > 10 {
+				t.Fatalf("betModal used radio buttons for %d outcomes (Slack caps at 10)", len(big))
+			}
+		}
 	}
 
 	// creation / onboarding / home / me builders

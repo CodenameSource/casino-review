@@ -307,7 +307,14 @@ func betModal(m ledger.Market) slack.ModalViewRequest {
 		for _, o := range m.Outcomes {
 			opts = append(opts, slack.NewOptionBlockObject(o, plainT(o), nil))
 		}
-		blocks = append(blocks, slack.NewInputBlock(blkOutcome, plainT("Outcome"), nil, slack.NewRadioButtonsBlockElement(actOutcome, opts...)))
+		// radio_buttons caps at 10 options; a static select handles up to 100.
+		// Both submit their choice under .SelectedOption, so handleBetSubmit
+		// reads either the same way.
+		var el slack.BlockElement = slack.NewRadioButtonsBlockElement(actOutcome, opts...)
+		if len(opts) > 10 {
+			el = slack.NewOptionsSelectBlockElement(slack.OptTypeStatic, plainT("Pick an outcome"), actOutcome, opts...)
+		}
+		blocks = append(blocks, slack.NewInputBlock(blkOutcome, plainT("Outcome"), nil, el))
 	}
 	blocks = append(blocks, slack.NewInputBlock(blkAmount, plainT("Amount (USDC)"), nil,
 		slack.NewPlainTextInputBlockElement(plainT("e.g. 10 or $10.50"), actAmount)))

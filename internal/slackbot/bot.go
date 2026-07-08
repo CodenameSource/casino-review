@@ -89,9 +89,11 @@ func (b *Bot) eventLoop(ctx context.Context) {
 					b.sock.Ack(*evt.Request)
 					go b.handleBlockAction(ctx, cb)
 				case slack.InteractionTypeViewSubmission:
-					// Modal submit: the ack payload carries validation errors or
-					// closes the dialog, so it must run before the ack.
-					b.handleViewSubmission(ctx, cb, evt.Request)
+					// Modal submit: can't pre-ack (the ack payload carries the
+					// validation errors / closes the dialog), so the handler acks
+					// itself — on its own goroutine, so a slow DB write can't
+					// head-of-line-block unrelated events on the socket.
+					go b.handleViewSubmission(ctx, cb, evt.Request)
 				case slack.InteractionTypeShortcut:
 					// Global ⚡ shortcut: open the new-market modal from anywhere.
 					b.sock.Ack(*evt.Request)
@@ -351,7 +353,12 @@ func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallbac
 	ba := cb.ActionCallback.BlockActions[0]
 	participant := "slack:" + cb.User.ID
 	ctx = ledger.WithVia(ctx, "slack")
-	inModal := cb.View.ID != ""
+	// A click inside an open MODAL updates that modal in place; a click on a
+	// message OR the App Home tab opens a fresh modal off the trigger id. Home
+	// clicks carry a non-empty *home* view id, so gate on the view TYPE — not
+	// mere presence — or UpdateView(modal request → home view) is rejected and
+	// the bet dialog silently never opens.
+	inModal := cb.View.ID != "" && cb.View.Type == slack.VTModal
 
 	switch {
 	// --- context-free navigation (value is a sentinel, not an id) ---
