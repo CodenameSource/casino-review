@@ -217,9 +217,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		if err != nil {
 			return errf(err)
 		}
-		_, pool, _ := b.svc.Get(ctx, m.ID)
-		return pub(fmt.Sprintf("💰 <@%s> funded %s → 💰 bounty on `%s` · pool now *%s*  ·  `/casino show %s`",
-			sc.UserID, amt, m.ContextRef, pool, m.ContextRef))
+		return b.cardReply(ctx, m.ID, participant,
+			fmt.Sprintf("💰 <@%s> funded %s into the bounty on `%s`", sc.UserID, amt, m.ContextRef))
 
 	case "market":
 		spec := map[string]any{}
@@ -234,8 +233,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		if err != nil {
 			return errf(err)
 		}
-		return pub(fmt.Sprintf("🆕 %s *%s* market open on `%s`\n_%s_\nOutcomes: `%s`\n🎲 `/casino bet %s %s <outcome> <amount>`  ·  or `/casino show %s` to tap a button",
-			kindEmoji(m.Kind), m.Kind, m.ContextRef, m.Question, strings.Join(m.Outcomes, "` `"), m.ContextRef, m.Kind, m.ContextRef))
+		return b.cardReply(ctx, m.ID, participant,
+			fmt.Sprintf("🆕 <@%s> opened a market — tap 🎲 *Bet* to get in:", sc.UserID))
 
 	case "bet":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
@@ -249,9 +248,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		if err := b.svc.Bet(ctx, id, participant, cmd.Outcome, amt); err != nil {
 			return errf(err)
 		}
-		m, pool, _ := b.svc.Get(ctx, id)
-		return pub(fmt.Sprintf("🎲 <@%s> put %s on *%s* (%s %s on `%s`) · pool now *%s*",
-			sc.UserID, amt, cmd.Outcome, kindEmoji(m.Kind), m.Kind, m.ContextRef, pool))
+		return b.cardReply(ctx, id, participant,
+			fmt.Sprintf("🎲 <@%s> put %s on *%s*", sc.UserID, amt, cmd.Outcome))
 
 	case "refund":
 		id, err := resolveID()
@@ -421,6 +419,18 @@ func (b *Bot) ackViewErr(req *socketmode.Request, block, msg string) {
 	}); err != nil {
 		log.Printf("slackbot: ack view: %v", err)
 	}
+}
+
+// cardReply builds an in-channel reply: a one-line lead + the market's card
+// (odds + Bet/Details buttons), so a fresh/updated market is immediately
+// tappable right where the action happened — not one command away.
+func (b *Bot) cardReply(ctx context.Context, marketID int64, participant, lead string) reply {
+	d, err := b.svc.Detail(ctx, marketID, participant)
+	if err != nil {
+		return reply{text: lead} // still confirm, just without the card
+	}
+	blocks := append([]slack.Block{slack.NewSectionBlock(mrkdwn(lead), nil, nil)}, marketCard(d)...)
+	return reply{blocks: blocks}
 }
 
 func (b *Bot) postChannel(text string) {
