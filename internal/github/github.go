@@ -3,6 +3,7 @@ package github
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -63,7 +64,13 @@ func (c Comment) IssueNumber() (int, bool) {
 }
 
 func (c *Client) do(method, url string, body io.Reader, out any) error {
-	req, err := http.NewRequest(method, url, body)
+	return c.doCtx(context.Background(), method, url, body, out)
+}
+
+// doCtx is do with a caller-supplied context, so latency-sensitive callers (e.g.
+// populating a Slack modal within the 3s trigger window) can bound the request.
+func (c *Client) doCtx(ctx context.Context, method, url string, body io.Reader, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return err
 	}
@@ -106,6 +113,28 @@ func (c *Client) ListComments(since time.Time) ([]Comment, error) {
 		apiBase, c.owner, c.repo, since.UTC().Format(time.RFC3339))
 	var out []Comment
 	err := c.do(http.MethodGet, url, nil, &out)
+	return out, err
+}
+
+// Pull is an open pull request, enough to populate a picker.
+type Pull struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Draft  bool   `json:"draft"`
+	User   struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ListOpenPulls returns the repo's open pull requests, most-recently-updated
+// first (up to 100). Context-bounded for the modal-open path.
+func (c *Client) ListOpenPulls(ctx context.Context) ([]Pull, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls?state=open&sort=updated&direction=desc&per_page=100",
+		apiBase, c.owner, c.repo)
+	var out []Pull
+	err := c.doCtx(ctx, http.MethodGet, url, nil, &out)
 	return out, err
 }
 

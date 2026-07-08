@@ -2,6 +2,7 @@ package slackbot
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -100,9 +101,36 @@ func TestBlockBuilders(t *testing.T) {
 		}
 	}
 
-	// creation / onboarding / home / me builders
-	if len(newMarketModal("").Blocks.BlockSet) == 0 || len(newMarketModal("#5").Blocks.BlockSet) == 0 {
-		t.Fatal("new-market modal empty")
+	// creation / onboarding / home / me builders. Cover both the free-text
+	// fallback (no PRs) and the PR-dropdown path, and a very long PR title that
+	// must be truncated to Slack's option limits.
+	prs := []prChoice{
+		{Ref: "#3664", Title: "Add the thing", Desc: "by @octocat"},
+		{Ref: "#42", Title: strings.Repeat("very long title ", 20), Desc: strings.Repeat("desc ", 40)},
+		{Ref: "#7", Title: "Draft work", Desc: ""},
+	}
+	if len(newMarketModal("", nil).Blocks.BlockSet) == 0 || len(newMarketModal("ext:X", nil).Blocks.BlockSet) == 0 {
+		t.Fatal("new-market modal (text) empty")
+	}
+	if len(newMarketModal("", prs).Blocks.BlockSet) == 0 || len(newMarketModal("#3664", prs).Blocks.BlockSet) == 0 {
+		t.Fatal("new-market modal (picker) empty")
+	}
+	if got := truncate(strings.Repeat("x", 200), 75); len([]rune(got)) > 75 {
+		t.Fatalf("truncate produced %d runes, want ≤75", len([]rune(got)))
+	}
+	if got := prRef("pr:o/r#3664"); got != "#3664" {
+		t.Fatalf("prRef(pr:o/r#3664) = %q, want #3664", got)
+	}
+	// A PR-dashboard prefill (normalized ref) preselects the matching option.
+	mdl := newMarketModal("pr:o/r#3664", prs)
+	var prSel *slack.SelectBlockElement
+	for _, blk := range mdl.Blocks.BlockSet {
+		if in, ok := blk.(*slack.InputBlock); ok && in.BlockID == blkNewPR {
+			prSel, _ = in.Element.(*slack.SelectBlockElement)
+		}
+	}
+	if prSel == nil || prSel.InitialOption == nil || prSel.InitialOption.Value != "#3664" {
+		t.Fatalf("prefill should preselect #3664 in the picker, got %+v", prSel)
 	}
 	if len(linkModal().Blocks.BlockSet) == 0 {
 		t.Fatal("link modal empty")

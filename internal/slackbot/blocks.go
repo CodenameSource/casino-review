@@ -38,6 +38,8 @@ const (
 	actOutcome     = "casino_outcome_a"
 	blkAmount      = "casino_amount"
 	actAmount      = "casino_amount_a"
+	blkNewPR       = "casino_new_pr"
+	actNewPR       = "casino_new_pr_a"
 	blkNewCtx      = "casino_new_ctx"
 	actNewCtx      = "casino_new_ctx_a"
 	blkNewKind     = "casino_new_kind"
@@ -348,11 +350,85 @@ func betDoneModal(m ledger.Market, outcome string, amt, pool ledger.USDC) slack.
 
 // --- create-market + link modals ---
 
-func newMarketModal(prefillCtx string) slack.ModalViewRequest {
-	ctxInput := slack.NewPlainTextInputBlockElement(plainT("#123  or  ext:PROJ-42"), actNewCtx)
-	if prefillCtx != "" && prefillCtx != "board" {
-		ctxInput.InitialValue = prefillCtx
+// prChoice is one open PR shown in the new-market picker.
+type prChoice struct {
+	Ref   string // "#123" — the context input the service parses
+	Title string
+	Desc  string
+}
+
+// isSentinel reports whether a prefill value is a button routing sentinel rather
+// than a real context ref.
+func isSentinel(s string) bool {
+	switch s {
+	case "", "home", "help", "menu", "board":
+		return true
 	}
+	return false
+}
+
+// prRef reduces a context ref to the "#N" PR form the picker matches on:
+// "pr:owner/repo#123" → "#123"; "#123" stays "#123"; anything else is returned
+// unchanged (e.g. an ext: key that slipped through).
+func prRef(s string) string {
+	if i := strings.LastIndex(s, "#"); i >= 0 {
+		return "#" + s[i+1:]
+	}
+	return s
+}
+
+// newMarketModal builds the create-a-market modal. When open PRs are available
+// it offers them as a dropdown (title + description) — no syntax to know — with
+// a secondary free-text field for an external key (ext:KEY) or a PR not in the
+// list. With no PRs (fetch failed / none open) it falls back to a single
+// free-text context field.
+func newMarketModal(prefill string, prs []prChoice) slack.ModalViewRequest {
+	var ctxBlocks []slack.Block
+	if len(prs) > 0 {
+		opts := make([]*slack.OptionBlockObject, 0, len(prs))
+		for _, p := range prs {
+			var desc *slack.TextBlockObject
+			if p.Desc != "" {
+				desc = plainT(truncate(p.Desc, 75))
+			}
+			opts = append(opts, slack.NewOptionBlockObject(p.Ref, plainT(truncate(p.Ref+" · "+p.Title, 75)), desc))
+		}
+		sel := slack.NewOptionsSelectBlockElement(slack.OptTypeStatic, plainT("Pick a pull request"), actNewPR, opts...)
+		prBlock := slack.NewInputBlock(blkNewPR, plainT("Which PR?"), plainT("The open pull request this market is about."), sel)
+		prBlock.Optional = true // validated server-side against the ext field
+
+		ext := slack.NewPlainTextInputBlockElement(plainT("ext:PROJ-42, or #123 if not listed"), actNewCtx)
+		// Carry an opening context (e.g. from a PR dashboard's ＋ New market):
+		// preselect the matching PR, else drop the ref into the ext field so it
+		// isn't lost. The dashboard prefill is the normalized "pr:o/r#N" form.
+		if strings.HasPrefix(prefill, "ext:") {
+			ext.InitialValue = prefill
+		} else if !isSentinel(prefill) {
+			ref := prRef(prefill)
+			matched := false
+			for i, p := range prs {
+				if p.Ref == ref {
+					sel.InitialOption = opts[i]
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				ext.InitialValue = ref
+			}
+		}
+		extBlock := slack.NewInputBlock(blkNewCtx, plainT("…or a key / other PR (advanced)"), plainT("External tracker key like ext:PROJ-42, or a PR number not in the list."), ext)
+		extBlock.Optional = true
+		ctxBlocks = []slack.Block{prBlock, extBlock}
+	} else {
+		ctxInput := slack.NewPlainTextInputBlockElement(plainT("#123  or  ext:PROJ-42"), actNewCtx)
+		if !isSentinel(prefill) {
+			ctxInput.InitialValue = prefill
+		}
+		ctxBlocks = []slack.Block{slack.NewInputBlock(blkNewCtx, plainT("Which PR (or tracker key)?"),
+			plainT("A GitHub PR like #123, or ext:KEY before a PR exists."), ctxInput)}
+	}
+
 	kindSelect := slack.NewOptionsSelectBlockElement(slack.OptTypeStatic, plainT("Pick a market type"), actNewKind,
 		slack.NewOptionBlockObject("bounty", plainT("💰 Bounty — pays the PR author on merge"), nil),
 		slack.NewOptionBlockObject("merge-by", plainT("📅 Merge-by — will it merge by a date?"), nil),
@@ -363,18 +439,32 @@ func newMarketModal(prefillCtx string) slack.ModalViewRequest {
 		slack.NewDatePickerBlockElement(actNewDeadline))
 	deadline.Optional = true
 
+	blocks := append(ctxBlocks,
+		slack.NewInputBlock(blkNewKind, plainT("Market type"), nil, kindSelect),
+		deadline,
+	)
 	return slack.ModalViewRequest{
 		Type:       slack.VTModal,
 		CallbackID: cbNewMarket,
 		Title:      plainT("New market"),
 		Submit:     plainT("Open market"),
 		Close:      plainT("Cancel"),
-		Blocks: slack.Blocks{BlockSet: []slack.Block{
-			slack.NewInputBlock(blkNewCtx, plainT("Which PR (or tracker key)?"), plainT("A GitHub PR like #123, or ext:KEY before a PR exists."), ctxInput),
-			slack.NewInputBlock(blkNewKind, plainT("Market type"), nil, kindSelect),
-			deadline,
-		}},
+		Blocks:     slack.Blocks{BlockSet: blocks},
 	}
+}
+
+// truncate collapses whitespace and clips to n runes with an ellipsis. Slack
+// text objects can't be empty, so a blank string becomes a single space.
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if s == "" {
+		return " "
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 func linkModal() slack.ModalViewRequest {

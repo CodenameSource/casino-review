@@ -13,6 +13,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 
 	"casino-review/internal/config"
+	"casino-review/internal/github"
 	"casino-review/internal/ledger"
 	"casino-review/internal/market"
 	"casino-review/internal/store"
@@ -24,6 +25,7 @@ type Bot struct {
 	svc       *market.Service
 	st        *store.Store
 	tel       *telemetry.T
+	gh        *github.Client // read-only: populates the new-market PR picker
 	api       *slack.Client
 	sock      *socketmode.Client
 	channelID string
@@ -31,7 +33,11 @@ type Bot struct {
 
 func New(cfg *config.Config, svc *market.Service, st *store.Store, tel *telemetry.T) *Bot {
 	api := slack.New(cfg.SlackBotToken, slack.OptionAppLevelToken(cfg.SlackAppToken))
-	return &Bot{cfg: cfg, svc: svc, st: st, tel: tel, api: api, sock: socketmode.New(api)}
+	return &Bot{
+		cfg: cfg, svc: svc, st: st, tel: tel,
+		gh:  github.New(cfg.Token, cfg.Owner, cfg.Repo),
+		api: api, sock: socketmode.New(api),
+	}
 }
 
 // Run connects Socket Mode and serves commands + the notification tailer
@@ -98,7 +104,7 @@ func (b *Bot) eventLoop(ctx context.Context) {
 					// Global ⚡ shortcut: open the new-market modal from anywhere.
 					b.sock.Ack(*evt.Request)
 					if cb.CallbackID == scGlobal {
-						go b.openView(cb.TriggerID, newMarketModal(""))
+						go b.openNewMarketModal(cb.TriggerID, "")
 					}
 				}
 			case socketmode.EventTypeEventsAPI:
@@ -363,11 +369,7 @@ func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallbac
 	switch {
 	// --- context-free navigation (value is a sentinel, not an id) ---
 	case ba.ActionID == actNewMarket:
-		prefill := ba.Value
-		if prefill == "home" || prefill == "help" || prefill == "menu" {
-			prefill = ""
-		}
-		b.openView(cb.TriggerID, newMarketModal(prefill))
+		b.openNewMarketModal(cb.TriggerID, ba.Value)
 	case ba.ActionID == actLink:
 		b.openView(cb.TriggerID, linkModal())
 	case ba.ActionID == actBrowse:
@@ -538,10 +540,28 @@ func (b *Bot) handleBetSubmit(ctx context.Context, cb slack.InteractionCallback,
 func (b *Bot) handleNewMarketSubmit(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
 	participant := "slack:" + cb.User.ID
 	vals := cb.View.State.Values
-	ctxInput := strings.TrimSpace(vals[blkNewCtx][actNewCtx].Value)
+	// Context comes from the PR dropdown when present, else the free-text field
+	// (external key, or a PR not in the list, or the no-PRs fallback).
+	ctxInput := ""
+	_, hasPicker := vals[blkNewPR]
+	// ctxBlk is the field the value came from, so validation errors surface on
+	// the control the user actually used.
+	ctxBlk := blkNewCtx
+	if hasPicker {
+		if v := vals[blkNewPR][actNewPR].SelectedOption.Value; v != "" {
+			ctxInput, ctxBlk = v, blkNewPR
+		}
+	}
+	if ctxInput == "" {
+		ctxInput = strings.TrimSpace(vals[blkNewCtx][actNewCtx].Value)
+	}
 	kind := vals[blkNewKind][actNewKind].SelectedOption.Value
 	if ctxInput == "" {
-		b.ackViewErr(req, blkNewCtx, "enter a PR like #123, or an ext:KEY")
+		errBlk := blkNewCtx
+		if hasPicker {
+			errBlk = blkNewPR
+		}
+		b.ackViewErr(req, errBlk, "pick a PR, or enter a PR/ext:KEY below")
 		return
 	}
 	if kind == "" {
@@ -564,7 +584,7 @@ func (b *Bot) handleNewMarketSubmit(ctx context.Context, cb slack.InteractionCal
 	}
 	m, err := b.svc.Create(ctx, kind, ctxInput, participant, spec)
 	if err != nil {
-		b.ackViewErr(req, blkNewCtx, err.Error())
+		b.ackViewErr(req, ctxBlk, err.Error())
 		return
 	}
 	b.sock.Ack(*req)
@@ -670,6 +690,46 @@ func (b *Bot) showView(cb slack.InteractionCallback, inModal bool, view slack.Mo
 		return
 	}
 	b.openView(cb.TriggerID, view)
+}
+
+// openNewMarketModal opens the create-a-market modal, populating the PR picker
+// from the repo's open PRs. The fetch is bounded well inside Slack's 3s trigger
+// window; if GitHub is slow or errors, it degrades to the free-text field.
+func (b *Bot) openNewMarketModal(triggerID, prefill string) {
+	// Bounded well inside Slack's 3s trigger window, leaving headroom for the
+	// OpenView call itself; a slow/failed fetch degrades to the text field.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var prs []prChoice
+	if pulls, err := b.gh.ListOpenPulls(ctx); err != nil {
+		log.Printf("slackbot: list open PRs for modal: %v (falling back to text input)", err)
+	} else {
+		prs = toPRChoices(pulls)
+	}
+	b.openView(triggerID, newMarketModal(prefill, prs))
+}
+
+func toPRChoices(pulls []github.Pull) []prChoice {
+	out := make([]prChoice, 0, len(pulls))
+	for _, p := range pulls {
+		desc := firstLine(p.Body)
+		if desc == "" {
+			desc = "by @" + p.User.Login
+		}
+		if p.Draft {
+			desc = "📝 draft · " + desc
+		}
+		out = append(out, prChoice{Ref: "#" + strconv.Itoa(p.Number), Title: p.Title, Desc: desc})
+	}
+	return out
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 // openMarketOrWarn fetches a market and rejects the action if it isn't OPEN,
