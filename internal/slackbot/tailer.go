@@ -58,8 +58,8 @@ func (b *Bot) tail(ctx context.Context) {
 			}
 			for _, e := range events {
 				after = e.ID
-				if msg := formatEvent(e.Type, e.Actor, e.ContextRef, e.Payload); msg != "" {
-					if _, _, err := b.api.PostMessage(b.channelID, slack.MsgOptionText(msg, false)); err != nil {
+				if opts, ok := b.eventMessage(ctx, e.Type, e.Actor, e.ContextRef, e.Payload); ok {
+					if _, _, err := b.api.PostMessage(b.channelID, opts...); err != nil {
 						log.Printf("slackbot tail: post: %v", err)
 					}
 				}
@@ -73,8 +73,50 @@ func (b *Bot) tail(ctx context.Context) {
 	}
 }
 
-// formatEvent renders a notification, or "" to skip (slack-originated events
-// were already answered in-channel by the command handler).
+// eventMessage turns a spine event into the message options to post, or ok=false
+// to skip (slack-originated events were already answered in-channel). New markets
+// arrive as a tappable card; resolutions/locks/voids get a 📊 View button;
+// everything else is plain text.
+func (b *Bot) eventMessage(ctx context.Context, evType, actor, ctxRef string, payload json.RawMessage) ([]slack.MsgOption, bool) {
+	var p struct {
+		Via      string `json:"via"`
+		MarketID int64  `json:"market_id"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, false
+	}
+	if p.Via == "slack" {
+		return nil, false
+	}
+
+	switch evType {
+	case "market.created":
+		// Post the live card so people can bet straight from the notification.
+		if d, err := b.svc.Detail(ctx, p.MarketID, ""); err == nil && d.Market.State == ledger.StateOpen {
+			lead := slack.NewSectionBlock(mrkdwn(fmt.Sprintf("🆕 New market on `%s` — tap to get in:", ctxRef)), nil, nil)
+			return []slack.MsgOption{slack.MsgOptionBlocks(append([]slack.Block{lead}, marketCard(d)...)...)}, true
+		}
+	case "market.resolved", "market.locked", "market.voided":
+		text := formatEvent(evType, actor, ctxRef, payload)
+		if text == "" {
+			return nil, false
+		}
+		id := strconv.FormatInt(p.MarketID, 10)
+		blocks := []slack.Block{
+			slack.NewSectionBlock(mrkdwn(text), nil, nil),
+			slack.NewActionBlock("notif_"+id, slack.NewButtonBlockElement(actDetails, id, plainT("📊 View"))),
+		}
+		return []slack.MsgOption{slack.MsgOptionBlocks(blocks...)}, true
+	}
+
+	if text := formatEvent(evType, actor, ctxRef, payload); text != "" {
+		return []slack.MsgOption{slack.MsgOptionText(text, false)}, true
+	}
+	return nil, false
+}
+
+// formatEvent renders a notification's text, or "" to skip (slack-originated
+// events were already answered in-channel by the command handler).
 func formatEvent(evType, actor, ctxRef string, payload json.RawMessage) string {
 	var p struct {
 		Via        string           `json:"via"`

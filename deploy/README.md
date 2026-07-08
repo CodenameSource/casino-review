@@ -45,6 +45,28 @@ docker compose up -d --build    # (add swap first on a small box — see above)
 For the market surface, also set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
 `SLACK_CHANNEL` in `.env` (Slack app setup: README → "The market").
 
+### Slack app config for the interactive UI
+
+The bot is Block-Kit-interactive (buttons, modals, an App Home dashboard, a
+global shortcut). These are **Slack app settings** at
+[api.slack.com/apps](https://api.slack.com/apps) → your Casino app — the code
+can't enable them, and if they're off the buttons render but do nothing:
+
+| Setting | Where | Needed for |
+|---|---|---|
+| **Interactivity: On** | Interactivity & Shortcuts | any button / modal (Socket Mode — no Request URL needed) |
+| **App Home → Home Tab: On** | Features → App Home | the `/casino`-free Home dashboard |
+| **Subscribe to bot event `app_home_opened`** | Event Subscriptions → Subscribe to bot events | publishing the Home tab |
+| **Global shortcut** — name "🎰 Casino", `callback_id: casino_open` | Interactivity & Shortcuts → Shortcuts → Create → Global | the ⚡-menu "new market" entry (optional) |
+
+No new bot scopes are required (`chat:write` covers posts/ephemerals;
+`views.publish/open/update` ride the existing tokens). **Adding the
+`app_home_opened` subscription requires reinstalling/updating the app** to take
+effect (the Home Tab toggle alone does not). Preset one-tap bet amounts default
+to $5 / $10 / $25 / $50 (edit `presetAmounts` in `internal/slackbot/blocks.go`).
+Money-settling (lock/resolve/void) is intentionally **not** exposed as buttons —
+it stays on the admin-gated `/casino` slash verbs and the host CLI.
+
 Verify:
 
 ```bash

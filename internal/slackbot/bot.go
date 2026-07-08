@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
 	"casino-review/internal/config"
@@ -91,6 +92,23 @@ func (b *Bot) eventLoop(ctx context.Context) {
 					// Modal submit: the ack payload carries validation errors or
 					// closes the dialog, so it must run before the ack.
 					b.handleViewSubmission(ctx, cb, evt.Request)
+				case slack.InteractionTypeShortcut:
+					// Global ⚡ shortcut: open the new-market modal from anywhere.
+					b.sock.Ack(*evt.Request)
+					if cb.CallbackID == scGlobal {
+						go b.openView(cb.TriggerID, newMarketModal(""))
+					}
+				}
+			case socketmode.EventTypeEventsAPI:
+				// Delivered over Socket Mode: we only care about app_home_opened,
+				// to (re)publish the user's Home dashboard.
+				b.sock.Ack(*evt.Request)
+				ev, ok := evt.Data.(slackevents.EventsAPIEvent)
+				if !ok {
+					continue
+				}
+				if ho, ok := ev.InnerEvent.Data.(*slackevents.AppHomeOpenedEvent); ok && ho.Tab == "home" {
+					go b.publishHome(ctx, ho.User)
 				}
 			case socketmode.EventTypeConnectionError:
 				log.Printf("slackbot: connection error: %v", evt.Data)
@@ -169,7 +187,8 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 
 	switch cmd.Name {
 	case "help":
-		return emsg(helpText)
+		login, _ := b.st.GithubLogin(ctx, sc.UserID)
+		return reply{blocks: welcomeBlocks(login != ""), ephemeral: true}
 
 	case "board":
 		ds, err := b.svc.BoardDetails(ctx, 15)
@@ -198,7 +217,7 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 			return errf(err)
 		}
 		login, _ := b.st.GithubLogin(ctx, sc.UserID)
-		return emsg(renderMyPositions(positions, login))
+		return reply{blocks: meBlocks(positions, login), ephemeral: true}
 
 	case "prs":
 		prs, err := b.st.TrackedPRs(ctx, b.cfg.RepoSlug(), 15)
@@ -315,38 +334,87 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 	return emsg("⚠️ unhandled command")
 }
 
-// handleBlockAction routes a board/detail button click. Button values carry the
-// market id, so a click is unambiguous without the user typing anything.
+// handleBlockAction routes every button click across cards, detail views, the
+// Home tab, onboarding, and inside modals. Sentinel-valued actions (New market,
+// Link, Refresh, home) are matched before any market-id parse. Modal-internal
+// clicks carry cb.View.ID (empty for message clicks) — used to choose OpenView
+// vs UpdateView. All money paths re-verify state server-side.
 func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallback) {
 	if len(cb.ActionCallback.BlockActions) == 0 {
 		return
 	}
+	// Card clicks are gated to the one channel; Home/modal/shortcut clicks carry
+	// an empty channel id (and are gated on identity + posted to b.channelID).
 	if cb.Channel.ID != "" && cb.Channel.ID != b.channelID {
 		return
 	}
 	ba := cb.ActionCallback.BlockActions[0]
 	participant := "slack:" + cb.User.ID
 	ctx = ledger.WithVia(ctx, "slack")
-	id, err := strconv.ParseInt(ba.Value, 10, 64)
-	if err != nil {
-		return
-	}
-	switch ba.ActionID {
-	case actBet:
-		m, _, err := b.svc.Get(ctx, id)
+	inModal := cb.View.ID != ""
+
+	switch {
+	// --- context-free navigation (value is a sentinel, not an id) ---
+	case ba.ActionID == actNewMarket:
+		prefill := ba.Value
+		if prefill == "home" || prefill == "help" || prefill == "menu" {
+			prefill = ""
+		}
+		b.openView(cb.TriggerID, newMarketModal(prefill))
+	case ba.ActionID == actLink:
+		b.openView(cb.TriggerID, linkModal())
+	case ba.ActionID == actBrowse:
+		ds, err := b.svc.BoardDetails(ctx, 15)
 		if err != nil {
 			b.ephemUser(cb.User.ID, "⚠️ "+err.Error())
 			return
 		}
-		if m.State != ledger.StateOpen {
-			b.ephemUser(cb.User.ID, fmt.Sprintf("🔒 That market is %s — no more bets.", strings.ToLower(m.State)))
+		if _, err := b.api.PostEphemeral(b.channelID, cb.User.ID, slack.MsgOptionBlocks(boardBlocks(ds)...)); err != nil {
+			log.Printf("slackbot: ephemeral: %v", err)
+		}
+	case ba.ActionID == actRefresh:
+		b.handleRefresh(ctx, cb, ba.Value, participant)
+
+	// --- bet flow: card outcome button → amount modal → placed ---
+	case strings.HasPrefix(ba.ActionID, actBetPick):
+		id, outcome := decMV(ba.Value)
+		m, ok := b.openMarketOrWarn(ctx, cb, id)
+		if !ok {
 			return
 		}
-		if _, err := b.api.OpenView(cb.TriggerID, betModal(m)); err != nil {
-			log.Printf("slackbot: open view: %v", err)
-			b.ephemUser(cb.User.ID, "⚠️ couldn't open the bet dialog — try `/casino bet` instead.")
+		b.showView(cb, inModal, betAmountModal(m, outcome))
+	case strings.HasPrefix(ba.ActionID, actAmtPreset):
+		b.placeBetFromModal(ctx, cb, ba.Value)
+	case ba.ActionID == actAmtCustom:
+		id, outcome := decMV(cb.View.PrivateMetadata)
+		m, _, err := b.svc.Get(ctx, id)
+		if err != nil {
+			b.warn(cb, "⚠️ "+err.Error())
+			return
 		}
-	case actDetails:
+		b.updateView(cb, betCustomModal(m, outcome))
+	case ba.ActionID == actBetAgain:
+		id, outcome := decMV(cb.View.PrivateMetadata)
+		m, ok := b.openMarketOrWarn(ctx, cb, id)
+		if !ok {
+			return
+		}
+		b.updateView(cb, betAmountModal(m, outcome))
+	case ba.ActionID == actBet:
+		id, _ := strconv.ParseInt(ba.Value, 10, 64)
+		m, ok := b.openMarketOrWarn(ctx, cb, id)
+		if !ok {
+			return
+		}
+		view := betModal(m) // radio picker for >4-outcome markets
+		if m.Kind == "bounty" {
+			view = betAmountModal(m, "merged")
+		}
+		b.showView(cb, inModal, view)
+
+	// --- details / refund (bare market-id value) ---
+	case ba.ActionID == actDetails:
+		id, _ := strconv.ParseInt(ba.Value, 10, 64)
 		d, err := b.svc.Detail(ctx, id, participant)
 		if err != nil {
 			b.ephemUser(cb.User.ID, "⚠️ "+err.Error())
@@ -355,7 +423,8 @@ func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallbac
 		if _, err := b.api.PostEphemeral(b.channelID, cb.User.ID, slack.MsgOptionBlocks(marketDetailBlocks(d)...)); err != nil {
 			log.Printf("slackbot: ephemeral: %v", err)
 		}
-	case actRefund:
+	case ba.ActionID == actRefund:
+		id, _ := strconv.ParseInt(ba.Value, 10, 64)
 		m, _, _ := b.svc.Get(ctx, id)
 		amt, err := b.svc.Refund(ctx, id, participant)
 		if err != nil {
@@ -364,24 +433,63 @@ func (b *Bot) handleBlockAction(ctx context.Context, cb slack.InteractionCallbac
 		}
 		b.tel.Track(participant, "slack_button", map[string]any{"action": "refund"})
 		b.postChannel(fmt.Sprintf("↩️ <@%s> withdrew %s from %s market on `%s`", cb.User.ID, amt, m.Kind, m.ContextRef))
+		b.publishHome(ctx, cb.User.ID)
 	}
 }
 
-// handleViewSubmission places a bet from the modal. Validation problems are
-// returned as inline modal errors (response_action: errors) so the dialog stays
-// open; success acks (closes the modal) and posts the bet to the channel.
-func (b *Bot) handleViewSubmission(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
-	if cb.View.CallbackID != cbBetModal {
-		b.sock.Ack(*req)
-		return
-	}
-	participant := "slack:" + cb.User.ID
-	ctx = ledger.WithVia(ctx, "slack")
-	id, err := strconv.ParseInt(cb.View.PrivateMetadata, 10, 64)
+// placeBetFromModal is the one-tap preset-amount path: place the bet, swap the
+// modal to a confirmation, mirror to the channel, refresh the bettor's Home.
+func (b *Bot) placeBetFromModal(ctx context.Context, cb slack.InteractionCallback, amountStr string) {
+	id, outcome := decMV(cb.View.PrivateMetadata)
+	amt, err := ledger.ParseUSDC(amountStr)
 	if err != nil {
-		b.sock.Ack(*req)
+		b.warn(cb, "⚠️ "+err.Error())
 		return
 	}
+	m, ok := b.openMarketOrWarn(ctx, cb, id)
+	if !ok {
+		return
+	}
+	if m.Kind == "bounty" {
+		outcome = "merged"
+	}
+	if outcome == "" {
+		b.warn(cb, "⚠️ no outcome selected")
+		return
+	}
+	if err := b.svc.Bet(ctx, id, "slack:"+cb.User.ID, outcome, amt); err != nil {
+		b.warn(cb, "⚠️ "+err.Error())
+		return
+	}
+	b.tel.Track("slack:"+cb.User.ID, "slack_button", map[string]any{"action": "bet"})
+	_, pool, _ := b.svc.Get(ctx, id)
+	b.updateView(cb, betDoneModal(m, outcome, amt, pool))
+	b.postChannel(fmt.Sprintf("🎲 <@%s> put %s on *%s* (%s %s on `%s`) · pool now *%s*",
+		cb.User.ID, amt, outcome, kindEmoji(m.Kind), m.Kind, m.ContextRef, pool))
+	b.publishHome(ctx, cb.User.ID)
+}
+
+// handleViewSubmission dispatches modal submits by callback id.
+func (b *Bot) handleViewSubmission(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
+	ctx = ledger.WithVia(ctx, "slack")
+	switch cb.View.CallbackID {
+	case cbBetModal:
+		b.handleBetSubmit(ctx, cb, req)
+	case cbNewMarket:
+		b.handleNewMarketSubmit(ctx, cb, req)
+	case cbLinkModal:
+		b.handleLinkSubmit(ctx, cb, req)
+	default:
+		b.sock.Ack(*req)
+	}
+}
+
+// handleBetSubmit places a bet from a text-amount modal (classic radio picker or
+// the Custom-amount step). Outcome comes from PrivateMetadata when present, else
+// from the radio input.
+func (b *Bot) handleBetSubmit(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
+	participant := "slack:" + cb.User.ID
+	id, outcome := decMV(cb.View.PrivateMetadata)
 	vals := cb.View.State.Values
 	amt, err := ledger.ParseUSDC(vals[blkAmount][actAmount].Value)
 	if err != nil {
@@ -393,8 +501,13 @@ func (b *Bot) handleViewSubmission(ctx context.Context, cb slack.InteractionCall
 		b.ackViewErr(req, blkAmount, err.Error())
 		return
 	}
-	outcome := "merged"
-	if m.Kind != "bounty" {
+	if m.State != ledger.StateOpen {
+		b.ackViewErr(req, blkAmount, "market is "+strings.ToLower(m.State)+" — no more bets")
+		return
+	}
+	if m.Kind == "bounty" {
+		outcome = "merged"
+	} else if outcome == "" {
 		outcome = vals[blkOutcome][actOutcome].SelectedOption.Value
 		if outcome == "" {
 			b.ackViewErr(req, blkOutcome, "pick an outcome")
@@ -410,6 +523,115 @@ func (b *Bot) handleViewSubmission(ctx context.Context, cb slack.InteractionCall
 	_, pool, _ := b.svc.Get(ctx, id)
 	b.postChannel(fmt.Sprintf("🎲 <@%s> put %s on *%s* (%s %s on `%s`) · pool now *%s*",
 		cb.User.ID, amt, outcome, kindEmoji(m.Kind), m.Kind, m.ContextRef, pool))
+	b.publishHome(ctx, cb.User.ID)
+}
+
+// handleNewMarketSubmit creates a market from the modal. Not gated — anyone may
+// open a market (creation is not a settling verb).
+func (b *Bot) handleNewMarketSubmit(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
+	participant := "slack:" + cb.User.ID
+	vals := cb.View.State.Values
+	ctxInput := strings.TrimSpace(vals[blkNewCtx][actNewCtx].Value)
+	kind := vals[blkNewKind][actNewKind].SelectedOption.Value
+	if ctxInput == "" {
+		b.ackViewErr(req, blkNewCtx, "enter a PR like #123, or an ext:KEY")
+		return
+	}
+	if kind == "" {
+		b.ackViewErr(req, blkNewKind, "pick a market type")
+		return
+	}
+	spec := map[string]any{}
+	if kind == "merge-by" {
+		date := vals[blkNewDeadline][actNewDeadline].SelectedDate
+		if date == "" {
+			b.ackViewErr(req, blkNewDeadline, "merge-by needs a deadline date")
+			return
+		}
+		d, err := ParseDeadline(date, time.Now())
+		if err != nil {
+			b.ackViewErr(req, blkNewDeadline, err.Error())
+			return
+		}
+		spec["deadline"] = d
+	}
+	m, err := b.svc.Create(ctx, kind, ctxInput, participant, spec)
+	if err != nil {
+		b.ackViewErr(req, blkNewCtx, err.Error())
+		return
+	}
+	b.sock.Ack(*req)
+	d, err := b.svc.Detail(ctx, m.ID, participant)
+	if err != nil {
+		return
+	}
+	lead := slack.NewSectionBlock(mrkdwn(fmt.Sprintf("🆕 <@%s> opened a market — tap to get in:", cb.User.ID)), nil, nil)
+	b.postBlocks(append([]slack.Block{lead}, marketCard(d)...))
+	b.publishHome(ctx, cb.User.ID)
+}
+
+func (b *Bot) handleLinkSubmit(ctx context.Context, cb slack.InteractionCallback, req *socketmode.Request) {
+	login := strings.TrimPrefix(strings.TrimSpace(cb.View.State.Values[blkLinkLogin][actLinkLogin].Value), "@")
+	if login == "" {
+		b.ackViewErr(req, blkLinkLogin, "enter your GitHub username")
+		return
+	}
+	if err := b.st.LinkIdentity(ctx, cb.User.ID, login); err != nil {
+		b.ackViewErr(req, blkLinkLogin, err.Error())
+		return
+	}
+	b.sock.Ack(*req)
+	b.postChannel(fmt.Sprintf("🔗 Linked <@%s> ↔ github:%s", cb.User.ID, login))
+	b.publishHome(ctx, cb.User.ID)
+}
+
+// handleRefresh re-renders a board or detail message in place via the response
+// URL (works for channel and ephemeral messages). Read-only, no gating.
+func (b *Bot) handleRefresh(ctx context.Context, cb slack.InteractionCallback, val, participant string) {
+	kind, id := decVal(val)
+	var blocks []slack.Block
+	switch kind {
+	case "detail":
+		d, err := b.svc.Detail(ctx, id, participant)
+		if err != nil {
+			return
+		}
+		blocks = marketDetailBlocks(d)
+	default: // board
+		ds, err := b.svc.BoardDetails(ctx, 15)
+		if err != nil {
+			return
+		}
+		blocks = boardBlocks(ds)
+	}
+	// Home refresh (from the Home action bar) has no message to replace.
+	if cb.ResponseURL == "" {
+		b.publishHome(ctx, cb.User.ID)
+		return
+	}
+	if _, _, err := b.api.PostMessage(b.channelID, slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionReplaceOriginal(cb.ResponseURL)); err != nil {
+		log.Printf("slackbot: refresh: %v", err)
+	}
+}
+
+// --- App Home ---
+
+func (b *Bot) publishHome(ctx context.Context, userID string) {
+	participant := "slack:" + userID
+	positions, err := b.svc.MyPositions(ctx, participant)
+	if err != nil {
+		log.Printf("slackbot: home positions: %v", err)
+	}
+	board, err := b.svc.BoardDetails(ctx, 5)
+	if err != nil {
+		log.Printf("slackbot: home board: %v", err)
+	}
+	login, _ := b.st.GithubLogin(ctx, userID)
+	view := slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: slack.Blocks{BlockSet: homeBlocks(login, positions, board)}}
+	if _, err := b.api.PublishView(userID, view, ""); err != nil {
+		log.Printf("slackbot: publish home: %v", err)
+	}
 }
 
 func (b *Bot) ackViewErr(req *socketmode.Request, block, msg string) {
@@ -418,6 +640,53 @@ func (b *Bot) ackViewErr(req *socketmode.Request, block, msg string) {
 		"errors":          map[string]string{block: msg},
 	}); err != nil {
 		log.Printf("slackbot: ack view: %v", err)
+	}
+}
+
+// openView opens a modal from a trigger id; showView/updateView choose between
+// opening a fresh modal and updating the current one (for modal-internal clicks).
+func (b *Bot) openView(triggerID string, view slack.ModalViewRequest) {
+	if _, err := b.api.OpenView(triggerID, view); err != nil {
+		log.Printf("slackbot: open view: %v", err)
+	}
+}
+
+func (b *Bot) updateView(cb slack.InteractionCallback, view slack.ModalViewRequest) {
+	if _, err := b.api.UpdateView(view, "", cb.View.Hash, cb.View.ID); err != nil {
+		log.Printf("slackbot: update view: %v", err)
+	}
+}
+
+func (b *Bot) showView(cb slack.InteractionCallback, inModal bool, view slack.ModalViewRequest) {
+	if inModal {
+		b.updateView(cb, view)
+		return
+	}
+	b.openView(cb.TriggerID, view)
+}
+
+// openMarketOrWarn fetches a market and rejects the action if it isn't OPEN,
+// warning the user. The single betting-safety chokepoint for interactive paths.
+func (b *Bot) openMarketOrWarn(ctx context.Context, cb slack.InteractionCallback, id int64) (ledger.Market, bool) {
+	m, _, err := b.svc.Get(ctx, id)
+	if err != nil {
+		b.warn(cb, "⚠️ "+err.Error())
+		return ledger.Market{}, false
+	}
+	if m.State != ledger.StateOpen {
+		b.warn(cb, fmt.Sprintf("🔒 That market is %s — no more bets.", strings.ToLower(m.State)))
+		return m, false
+	}
+	return m, true
+}
+
+// warn surfaces an error for an interactive action as an ephemeral in the
+// channel (modals can't hold an ad-hoc error without a rebuild).
+func (b *Bot) warn(cb slack.InteractionCallback, text string) { b.ephemUser(cb.User.ID, text) }
+
+func (b *Bot) postBlocks(blocks []slack.Block) {
+	if _, _, err := b.api.PostMessage(b.channelID, slack.MsgOptionBlocks(blocks...)); err != nil {
+		log.Printf("slackbot: post: %v", err)
 	}
 }
 
@@ -510,35 +779,6 @@ func kindEmoji(kind string) string {
 		return "🔎"
 	}
 	return "🎯"
-}
-
-// renderMyPositions is the `/casino me` view.
-func renderMyPositions(ps []ledger.PositionView, githubLogin string) string {
-	id := "not linked — `/casino link <github-login>` so bounties can pay you"
-	if githubLogin != "" {
-		id = "github:" + githubLogin
-	}
-	if len(ps) == 0 {
-		return fmt.Sprintf("🎰 *Your bets* — %s\nNo open bets yet. See `/casino board`.", id)
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "🎰 *Your bets* — %s", id)
-	var total ledger.USDC
-	for _, p := range ps {
-		outcome := ""
-		if p.Kind != "bounty" {
-			outcome = "*" + p.Outcome + "* "
-		}
-		lock := ""
-		if p.MarketState == ledger.StateLocked {
-			lock = " 🔒"
-		}
-		fmt.Fprintf(&sb, "\n• %s *%s* on `%s` · %s%s%s",
-			kindEmoji(p.Kind), p.Kind, p.ContextRef, outcome, p.Amount, lock)
-		total += p.Amount
-	}
-	fmt.Fprintf(&sb, "\nTotal staked: *%s*", total)
-	return sb.String()
 }
 
 func renderPRs(repo string, prs []store.TrackedPR, pending int) string {
