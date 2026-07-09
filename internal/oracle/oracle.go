@@ -84,9 +84,13 @@ func (o *Oracle) Once(ctx context.Context, apply bool) ([]Action, error) {
 		return nil, err
 	}
 	now := time.Now()
+	// Per-pass PR-status cache: markets sharing a PR (a bounty + a merge-by)
+	// need only one GET, and a PR that errored once isn't retried this pass.
+	cache := map[int]*github.PullStatus{}
+	failed := map[int]bool{}
 	var actions []Action
 	for _, m := range markets {
-		a, ok := o.decide(ctx, m, now)
+		a, ok := o.decide(ctx, m, now, cache, failed)
 		if !ok {
 			continue
 		}
@@ -101,25 +105,40 @@ func (o *Oracle) Once(ctx context.Context, apply bool) ([]Action, error) {
 }
 
 // decide determines the settlement for one market, or ok=false to leave it.
-func (o *Oracle) decide(ctx context.Context, m ledger.Market, now time.Time) (Action, bool) {
+func (o *Oracle) decide(ctx context.Context, m ledger.Market, now time.Time, cache map[int]*github.PullStatus, failed map[int]bool) (Action, bool) {
 	base := Action{MarketID: m.ID, Kind: m.Kind, ContextRef: m.ContextRef}
 	switch m.Kind {
 	case "bounty":
-		// Pays the PR author immediately on merge (challenge window 0).
-		if ps, ok := o.prStatus(ctx, m); ok && ps.Merged {
+		// Pays the PR author immediately on merge (challenge window 0). A merged
+		// PR with no resolvable author (deleted account) is left for manual
+		// settling rather than paid to an unclaimable "github:" payee.
+		if ps, ok := o.prStatus(ctx, m, cache, failed); ok && ps.Merged && ps.User.Login != "" {
 			base.Op, base.Outcome, base.Solver = "resolve", "merged", "github:"+ps.User.Login
 			return base, true
 		}
 
 	case "merge-by":
-		ps, ok := o.prStatus(ctx, m)
+		ps, ok := o.prStatus(ctx, m, cache, failed)
 		if ok && ps.Merged && ps.MergedAt != nil && m.ResolvesBy != nil && !ps.MergedAt.After(*m.ResolvesBy) {
 			base.Op, base.Outcome = "resolve", "yes" // merged in time
 			return base, true
 		}
 		if m.ResolvesBy != nil && now.After(*m.ResolvesBy) {
-			base.Op, base.Outcome = "resolve", "no" // deadline passed (never merged, or merged late)
-			return base, true
+			// "no" requires a SUCCESSFUL, scoped status confirming not-merged-in-
+			// time — the "yes" branch already returned if it merged in time, so
+			// ok here means confirmed-not. Never settle "no" on a GitHub error
+			// (leave OPEN, retry next pass) — that would blindly pay the wrong
+			// side if the PR actually merged just before the deadline.
+			switch {
+			case ok:
+				base.Op, base.Outcome = "resolve", "no"
+				return base, true
+			case !o.observable(m):
+				// A merge-by on a repo/ext ref this oracle can never observe
+				// can't be settled by merge status → void so stakes refund.
+				base.Op, base.Reason = "void", "deadline passed on an unobservable market"
+				return base, true
+			}
 		}
 
 	case "findings-count":
@@ -167,18 +186,34 @@ func (o *Oracle) applyAction(ctx context.Context, a Action) error {
 }
 
 // prStatus fetches merge state for a PR-context market in the configured repo
-// (ok=false for ext: markets or markets on another repo).
-func (o *Oracle) prStatus(ctx context.Context, m ledger.Market) (*github.PullStatus, bool) {
+// (ok=false for ext: markets, markets on another repo, or a GitHub error). The
+// per-pass cache de-dupes shared PRs; a PR that errored once is not retried.
+func (o *Oracle) prStatus(ctx context.Context, m ledger.Market, cache map[int]*github.PullStatus, failed map[int]bool) (*github.PullStatus, bool) {
 	n, ok := o.prNumber(m)
 	if !ok {
 		return nil, false
 	}
+	if failed[n] {
+		return nil, false
+	}
+	if ps, ok := cache[n]; ok {
+		return ps, true
+	}
 	ps, err := o.gh.PullStatus(ctx, n)
 	if err != nil {
 		log.Printf("oracle: pull status %s: %v", m.ContextRef, err)
+		failed[n] = true
 		return nil, false
 	}
+	cache[n] = ps
 	return ps, true
+}
+
+// observable reports whether the oracle can read this market's PR merge status
+// (i.e. it's a PR on the configured repo).
+func (o *Oracle) observable(m ledger.Market) bool {
+	_, ok := o.prNumber(m)
+	return ok
 }
 
 // prNumber returns the PR number for a market on the configured repo.
