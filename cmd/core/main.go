@@ -12,7 +12,11 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"casino-review/internal/config"
+	"casino-review/internal/github"
+	"casino-review/internal/ledger"
+	"casino-review/internal/market"
 	"casino-review/internal/monitor"
+	"casino-review/internal/oracle"
 	"casino-review/internal/store"
 	"casino-review/internal/telemetry"
 )
@@ -47,6 +51,16 @@ func main() {
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return monitor.New(cfg, st, tel).Run(ctx) })
 	g.Go(func() error { return telemetry.ServeMetrics(ctx, cfg.MetricsAddr) })
+
+	// Resolution oracle: auto-settles markets on merge/findings/expiry. Its
+	// events flow to Slack via the bot's tailer (via != "slack" is posted).
+	if cfg.OracleEnabled {
+		svc := market.NewService(cfg, ledger.New(st), tel)
+		o := oracle.New(cfg, svc, ledger.New(st), github.New(cfg.Token, cfg.Owner, cfg.Repo), st)
+		g.Go(func() error { return o.Run(ctx) })
+	} else {
+		log.Printf("core: resolution oracle disabled (ORACLE_ENABLED=false)")
+	}
 
 	if err := g.Wait(); err != nil && err != context.Canceled {
 		log.Fatalf("core: %v", err)

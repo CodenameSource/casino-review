@@ -138,6 +138,29 @@ func (c *Client) ListOpenPulls(ctx context.Context) ([]Pull, error) {
 	return out, err
 }
 
+// PullStatus is a PR's merge state — enough for the resolution oracle to settle
+// markets on it (bounty pays User.Login; merge-by compares MergedAt to the deadline).
+type PullStatus struct {
+	Number   int        `json:"number"`
+	State    string     `json:"state"` // "open" | "closed"
+	Merged   bool       `json:"merged"`
+	MergedAt *time.Time `json:"merged_at"`
+	Title    string     `json:"title"`
+	User     struct {
+		Login string `json:"login"`
+	} `json:"user"` // the PR author (the bounty payee)
+}
+
+// PullStatus fetches one PR's merge state. Context-bounded for the oracle loop.
+func (c *Client) PullStatus(ctx context.Context, number int) (*PullStatus, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", apiBase, c.owner, c.repo, number)
+	var ps PullStatus
+	if err := c.doCtx(ctx, http.MethodGet, url, nil, &ps); err != nil {
+		return nil, err
+	}
+	return &ps, nil
+}
+
 // IsPullRequest reports whether an issue number is actually a pull request.
 func (c *Client) IsPullRequest(number int) (bool, error) {
 	var issue struct {

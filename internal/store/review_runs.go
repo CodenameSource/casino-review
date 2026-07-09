@@ -82,6 +82,27 @@ func (s *Store) TrackedPRs(ctx context.Context, repo string, limit int) ([]Track
 	return out, rows.Err()
 }
 
+// FindingsForPR returns the finding count of the most recent non-addon review
+// run for a PR that recorded one — the findings-count resolution oracle's input.
+// ok=false means no reviewable run yet (so the market isn't resolvable).
+func (s *Store) FindingsForPR(ctx context.Context, repo string, pr int) (count int, ok bool, err error) {
+	var n *int
+	err = s.Pool.QueryRow(ctx,
+		`SELECT findings_count FROM review_runs
+		 WHERE repo=$1 AND pr=$2 AND findings_count IS NOT NULL AND engine_kind <> 'addon'
+		 ORDER BY finished_at DESC NULLS LAST LIMIT 1`, repo, pr).Scan(&n)
+	if err == pgx.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if n == nil {
+		return 0, false, nil
+	}
+	return *n, true, nil
+}
+
 // LastReviewRun returns the most recent finished REEL run for a repo (any PR),
 // which feeds the selector's PreviousHadFindings signal. Addon (bonus) runs are
 // excluded: they aren't reel assignments, and letting them shadow the previous

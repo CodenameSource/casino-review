@@ -33,6 +33,9 @@ type Config struct {
 	SlackAppToken string   // xapp-… (socket mode)
 	SlackChannel  string   // channel ID (C…) or #name — the ONLY channel the bot honors
 	SlackAdmins   []string // Slack user IDs allowed to lock/resolve/void; empty = those verbs disabled in Slack
+
+	OracleEnabled      bool          // run the resolution oracle in core (auto-settle markets on merge/findings/expiry)
+	OraclePollInterval time.Duration // how often the oracle scans for resolvable markets
 }
 
 // RepoSlug returns "owner/repo" for the monitored repo.
@@ -114,6 +117,10 @@ func Load() (*Config, error) {
 	}
 	if c.AssetsTTL, err = time.ParseDuration(env("ASSETS_TTL", "720h")); err != nil { // 30 days
 		return nil, fmt.Errorf("invalid ASSETS_TTL: %w", err)
+	}
+	c.OracleEnabled = env("ORACLE_ENABLED", "true") == "true"
+	if c.OraclePollInterval, err = time.ParseDuration(env("ORACLE_POLL_INTERVAL", "60s")); err != nil {
+		return nil, fmt.Errorf("invalid ORACLE_POLL_INTERVAL: %w", err)
 	}
 
 	if c.Token == "" {

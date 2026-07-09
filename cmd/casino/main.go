@@ -5,6 +5,7 @@
 //	casino cleanup                                one prune pass of old GIF assets
 //	casino db migrate                             apply schema migrations
 //	casino review run <engine> --pr N [--post]    run one engine against a PR
+//	casino oracle once [--apply]                  settle resolvable markets (dry-run unless --apply)
 package main
 
 import (
@@ -67,6 +68,8 @@ func main() {
 		runPRs(cfg, os.Args[2:])
 	case "market":
 		runMarket(cfg, os.Args[2:])
+	case "oracle":
+		runOracle(cfg, os.Args[2:])
 	default:
 		usage()
 	}
@@ -144,7 +147,8 @@ func usage() {
   casino market bet <id> <outcome> <amount> [--as id]
   casino market board | show <id> | me [--as id]
   casino market refund <id> | lock <id> | void <id> [reason]
-  casino market resolve <id> <outcome> [--solver login] [--as id]`)
+  casino market resolve <id> <outcome> [--solver login] [--as id]
+  casino oracle once [--apply]                        # settle resolvable markets (dry-run unless --apply)`)
 	os.Exit(2)
 }
 

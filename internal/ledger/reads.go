@@ -2,6 +2,26 @@ package ledger
 
 import "context"
 
+// ResolvableMarkets returns every OPEN or LOCKED market — the set the resolution
+// oracle attempts to settle each pass. Resolve is state-guarded, so attempting a
+// market that a concurrent action already moved is a harmless no-op.
+func (l *Ledger) ResolvableMarkets(ctx context.Context) ([]Market, error) {
+	rows, err := l.st.Pool.Query(ctx, marketSelect+` WHERE state IN ('OPEN','LOCKED') ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Market
+	for rows.Next() {
+		m, err := scanMarket(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // MarketsForContext returns every non-voided market attached to a context ref
 // (a PR or ext: key), newest first — the data behind a PR's market dashboard.
 func (l *Ledger) MarketsForContext(ctx context.Context, contextRef string) ([]Market, error) {
