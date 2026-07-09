@@ -2,8 +2,10 @@ package slackbot
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 
@@ -86,18 +88,139 @@ func refundConfirm() *slack.ConfirmationBlockObject {
 		plainT("Refund"), plainT("Keep it"))
 }
 
-// oddsLine renders the money spread for a card: a pool total for a bounty, the
-// per-outcome odds otherwise.
-func oddsLine(d market.Detail) string {
+var rfc3339Re = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}T[0-9:]+Z\b`)
+
+// countdown renders a compact relative duration to a deadline: "overdue",
+// "in 42m", "in 5h", "in 2d". ok=false when there is no deadline (t == nil).
+func countdown(t *time.Time, now time.Time) (text string, overdue, ok bool) {
+	if t == nil {
+		return "", false, false
+	}
+	d := t.Sub(now)
+	switch {
+	case d <= 0:
+		return "overdue", true, true
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m < 1 {
+			m = 1 // never render "in 0m"
+		}
+		return fmt.Sprintf("in %dm", m), false, true
+	case d < 24*time.Hour:
+		return fmt.Sprintf("in %dh", int(d.Hours())), false, true
+	default:
+		return fmt.Sprintf("in %dd", int(d.Hours()/24)), false, true
+	}
+}
+
+// slackDate emits Slack's <!date> token so each viewer sees the time in their
+// own timezone; {date_short_pretty} collapses to "today"/"tomorrow" when near.
+// The pipe fallback is a UTC string for clients that can't resolve it.
+func slackDate(t time.Time) string {
+	return fmt.Sprintf("<!date^%d^{date_short_pretty} at {time}|%s>",
+		t.Unix(), t.UTC().Format("Jan 2, 2006 at 3:04 PM MST"))
+}
+
+// conditionLine is the bold, plain-English question at the top of a card,
+// authored per kind so it never repeats the long context ref or a raw
+// timestamp. The context ref appears once, as "#3664".
+func conditionLine(m ledger.Market) string {
+	e := kindEmoji(m.Kind)
+	ref := prRef(m.ContextRef)
+	switch m.Kind {
+	case "bounty":
+		return fmt.Sprintf("%s  *Will `%s` get merged?*", e, ref)
+	case "merge-by":
+		return fmt.Sprintf("%s  *Will `%s` merge in time?*", e, ref)
+	case "findings-count":
+		return fmt.Sprintf("%s  *How many findings will the review flag on `%s`?*", e, ref)
+	default:
+		return fmt.Sprintf("%s  *%s*", e, cleanQuestion(m))
+	}
+}
+
+// cleanQuestion (fallback path only) strips the redundant long context ref and
+// any raw RFC3339 timestamp out of a custom stored Question.
+func cleanQuestion(m ledger.Market) string {
+	q := strings.ReplaceAll(m.Question, m.ContextRef, prRef(m.ContextRef))
+	q = rfc3339Re.ReplaceAllString(q, "the deadline")
+	return strings.Join(strings.Fields(q), " ")
+}
+
+func stateBadge(s string) string {
+	switch s {
+	case ledger.StateLocked:
+		return "  🔒 _locked_"
+	case ledger.StateResolved:
+		return "  🏁 _resolved_"
+	}
+	return ""
+}
+
+// metaLine is the muted context line: when betting closes (relative + localized)
+// fused with what resolves the market. Handles the no-deadline kinds.
+func metaLine(m ledger.Market, d market.Detail, now time.Time) string {
+	switch m.Kind {
+	case "bounty":
+		return fmt.Sprintf("♾️ no deadline · %d backer(s) · resolves when the PR merges (GitHub)", d.Backers)
+	case "findings-count":
+		return "♾️ no deadline · resolves to the bucket matching the review's finding count"
+	default: // merge-by (and any deadline-bearing kind)
+		text, overdue, ok := countdown(m.ResolvesBy, now)
+		if !ok {
+			return "resolves from GitHub merge status"
+		}
+		if overdue {
+			return fmt.Sprintf("🔴 deadline passed · %s · resolving now from GitHub", slackDate(*m.ResolvesBy))
+		}
+		return fmt.Sprintf("⏳ closes *%s* · %s · resolves from GitHub merge status", text, slackDate(*m.ResolvesBy))
+	}
+}
+
+// oneSided reports whether exactly one outcome has takers (so the funded side
+// pays only ~1×).
+func oneSided(odds []market.OutcomeOdds) bool {
+	n := 0
+	for _, o := range odds {
+		if o.PayoutX > 0 {
+			n++
+		}
+	}
+	return n == 1
+}
+
+// fmtX trims a payout multiple to 3 significant figures: "1", "1.67", "2.5".
+func fmtX(x float64) string { return strconv.FormatFloat(x, 'g', 3, 64) }
+
+// payoutLine is the card's money line. It leads with the payout multiple (what
+// $1 returns if that outcome wins), never a bare "%" (which reads as
+// probability), and frames an empty side as opportunity.
+func payoutLine(d market.Detail) string {
 	m := d.Market
 	if m.Kind == "bounty" {
-		return fmt.Sprintf("Pool *%s* · %d backer(s)", d.Pool, d.Backers)
+		if d.Pool == 0 {
+			return "💰 _pot empty — be the first to back the author_"
+		}
+		return fmt.Sprintf("💰 pot *%s* → all of it goes to the PR author on merge", d.Pool)
 	}
-	line := market.Line(m.Outcomes, d.OutcomePools)
 	if d.Pool == 0 {
-		return "_no bets yet_ · " + line
+		return "🎲 _no bets yet — the first bet on any side sets the odds_"
 	}
-	return fmt.Sprintf("%s · pool *%s*", line, d.Pool)
+	odds := market.Odds(m.Outcomes, d.OutcomePools)
+	parts := make([]string, len(odds))
+	for i, o := range odds {
+		label := outcomeBtnLabel(m.Outcomes, i)
+		if o.PayoutX == 0 {
+			parts[i] = fmt.Sprintf("%s %s → _no takers_", label, o.Pool)
+		} else {
+			parts[i] = fmt.Sprintf("%s %s → pays *%s×*", label, o.Pool, fmtX(o.PayoutX))
+		}
+	}
+	line := strings.Join(parts, "    ·    ")
+	if oneSided(odds) {
+		line += "\n⚠️ _all the money's on one side — it only pays ~1× (≈ your stake back). Back another outcome to move the odds._"
+	}
+	return line
 }
 
 // outcomeBtnLabel labels a per-outcome bet button: ✅/❌ for a binary market,
@@ -141,20 +264,19 @@ func betButtons(m ledger.Market) []slack.BlockElement {
 // only while OPEN.
 func marketCard(d market.Detail) []slack.Block {
 	m := d.Market
-	lock := ""
-	switch m.State {
-	case ledger.StateLocked:
-		lock = "  🔒 _locked_"
-	case ledger.StateResolved:
-		lock = "  🏁 _resolved_"
-	}
-	head := fmt.Sprintf("*%s %s* on `%s`%s\n_%s_\n%s",
-		kindEmoji(m.Kind), m.Kind, m.ContextRef, lock, m.Question, oddsLine(d))
-	blocks := []slack.Block{slack.NewSectionBlock(mrkdwn(head), nil, nil)}
-	if m.State != ledger.StateOpen {
-		return blocks
-	}
+	now := time.Now()
 	id := strconv.FormatInt(m.ID, 10)
+	blocks := []slack.Block{
+		// plain-English condition + state badge
+		slack.NewSectionBlock(mrkdwn(conditionLine(m)+stateBadge(m.State)), nil, nil),
+		// muted: when it closes + what resolves it
+		slack.NewContextBlock("meta_"+id, mrkdwn(metaLine(m, d, now))),
+		// muted: payout-first money line
+		slack.NewContextBlock("odds_"+id, mrkdwn(payoutLine(d))),
+	}
+	if m.State != ledger.StateOpen {
+		return blocks // locked/resolved: no buttons (board/tailer reuse this)
+	}
 	els := append(betButtons(m), slack.NewButtonBlockElement(actDetails, id, plainT("📊 Details")))
 	blocks = append(blocks, slack.NewActionBlock("card_"+id, els...))
 	return blocks
@@ -201,36 +323,55 @@ func prDashboardBlocks(contextRef string, ds []market.Detail) []slack.Block {
 	return blocks
 }
 
-// marketDetailBlocks is the single-market deep view (odds table, your stake,
-// bet + refund actions). No Details button — you're already looking at them.
+// marketDetailBlocks is the single-market deep view: condition, a facts grid
+// (pool / backers / closes / resolver), a full odds table with your stake, and
+// bet + refund actions. No Details button — you're already looking at them.
 func marketDetailBlocks(d market.Detail) []slack.Block {
 	m := d.Market
-	head := fmt.Sprintf("*%s %s* on `%s` · [%s]\n_%s_\nPool *%s* · %d backer(s)",
-		kindEmoji(m.Kind), m.Kind, m.ContextRef, m.State, m.Question, d.Pool, d.Backers)
-	blocks := []slack.Block{slack.NewSectionBlock(mrkdwn(head), nil, nil)}
+	now := time.Now()
+	id := strconv.FormatInt(m.ID, 10)
+
+	blocks := []slack.Block{
+		slack.NewSectionBlock(mrkdwn(conditionLine(m)+"   `"+m.State+"`"), nil, nil),
+		slack.NewSectionBlock(nil, []*slack.TextBlockObject{
+			mrkdwn("*Pool*\n" + d.Pool.String()),
+			mrkdwn(fmt.Sprintf("*Backers*\n%d", d.Backers)),
+			mrkdwn("*Closes*\n" + closesField(m, now)),
+			mrkdwn("*Resolves from*\n" + resolverField(m)),
+		}, nil),
+		slack.NewDividerBlock(),
+	}
 
 	if m.Kind == "bounty" {
 		if mine := d.MyStake["merged"]; mine > 0 {
-			blocks = append(blocks, slack.NewSectionBlock(mrkdwn(fmt.Sprintf("Your stake: *%s*", mine)), nil, nil))
+			blocks = append(blocks, slack.NewContextBlock("mine_"+id,
+				mrkdwn("Your stake: *"+mine.String()+"*  (goes to the author if it merges)")))
 		}
 	} else {
+		odds := market.Odds(m.Outcomes, d.OutcomePools)
 		var sb strings.Builder
-		for _, o := range market.Odds(m.Outcomes, d.OutcomePools) {
-			payout := "—"
+		for i, o := range odds {
+			payout := "_no takers_"
 			if o.PayoutX > 0 {
-				payout = fmt.Sprintf("~%.2f×", o.PayoutX)
+				payout = fmt.Sprintf("*pays %.2f×*", o.PayoutX)
 			}
 			mine := ""
 			if v := d.MyStake[o.Outcome]; v > 0 {
-				mine = fmt.Sprintf("  ← you: *%s*", v)
+				mine = fmt.Sprintf("   ← you: *%s*", v)
 			}
-			fmt.Fprintf(&sb, "`%-10s` %s  (%d%%) · win pays %s%s\n", o.Outcome, o.Pool, int(o.Prob*100+0.5), payout, mine)
+			// The "%" here is explicitly labeled "share" — never odds.
+			fmt.Fprintf(&sb, "%s  `%s` %s · %s · %d%% share%s\n",
+				outcomeBtnLabel(m.Outcomes, i), o.Outcome, o.Pool, payout, int(o.Prob*100+0.5), mine)
 		}
 		blocks = append(blocks, slack.NewSectionBlock(mrkdwn(sb.String()), nil, nil))
+		note := "Parimutuel: the whole pot splits among winners by stake. “pays 2×” ≈ each $1 back ~$2 if that outcome wins. % share is money on that side, *not* the odds it happens."
+		if oneSided(odds) {
+			note = "⚠️ One-sided pool pays ~1× — a lone side just returns your stake. " + note
+		}
+		blocks = append(blocks, slack.NewContextBlock("expl_"+id, mrkdwn(note)))
 	}
 
 	if m.State == ledger.StateOpen {
-		id := strconv.FormatInt(m.ID, 10)
 		els := betButtons(m)
 		if hasStake(d.MyStake) {
 			els = append(els, slack.NewButtonBlockElement(actRefund, id, plainT("↩️ Refund")).WithStyle(slack.StyleDanger).WithConfirm(refundConfirm()))
@@ -238,6 +379,28 @@ func marketDetailBlocks(d market.Detail) []slack.Block {
 		blocks = append(blocks, slack.NewActionBlock("detail_"+id, els...))
 	}
 	return blocks
+}
+
+func closesField(m ledger.Market, now time.Time) string {
+	text, overdue, ok := countdown(m.ResolvesBy, now)
+	if !ok {
+		return "no deadline"
+	}
+	if overdue {
+		return "deadline passed · " + slackDate(*m.ResolvesBy)
+	}
+	return text + " · " + slackDate(*m.ResolvesBy)
+}
+
+func resolverField(m ledger.Market) string {
+	switch m.Kind {
+	case "bounty":
+		return "GitHub merge → PR author"
+	case "findings-count":
+		return "review finding count"
+	default:
+		return "GitHub merge status"
+	}
 }
 
 func hasStake(m map[string]ledger.USDC) bool {

@@ -4,12 +4,80 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/slack-go/slack"
 
 	"casino-review/internal/ledger"
 	"casino-review/internal/market"
 )
+
+func TestCountdown(t *testing.T) {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { tt := now.Add(d); return &tt }
+	cases := []struct {
+		in            *time.Time
+		want          string
+		overdue, okay bool
+	}{
+		{nil, "", false, false},
+		{at(-time.Hour), "overdue", true, true},
+		{at(30 * time.Minute), "in 30m", false, true},
+		{at(20 * time.Second), "in 1m", false, true}, // never "in 0m"
+		{at(5 * time.Hour), "in 5h", false, true},
+		{at(50 * time.Hour), "in 2d", false, true},
+	}
+	for _, c := range cases {
+		got, ov, ok := countdown(c.in, now)
+		if got != c.want || ov != c.overdue || ok != c.okay {
+			t.Errorf("countdown = (%q,%v,%v), want (%q,%v,%v)", got, ov, ok, c.want, c.overdue, c.okay)
+		}
+	}
+}
+
+func TestConditionLineNoLeak(t *testing.T) {
+	// The authored per-kind line must not leak the long ref or a raw timestamp.
+	m := ledger.Market{Kind: "merge-by", ContextRef: "pr:mandel-ai/mandel#3664",
+		Question: "Will pr:mandel-ai/mandel#3664 be merged by 2026-07-11T09:46:52Z?"}
+	got := conditionLine(m)
+	if strings.Contains(got, "mandel-ai/mandel") || strings.Contains(got, "2026-07-11T") {
+		t.Errorf("conditionLine leaked raw ref/timestamp: %q", got)
+	}
+	if !strings.Contains(got, "#3664") {
+		t.Errorf("conditionLine should reference #3664: %q", got)
+	}
+	// Unknown kind falls back to a scrubbed stored question.
+	u := ledger.Market{Kind: "weird", ContextRef: "pr:o/r#5", Question: "Odd pr:o/r#5 by 2026-07-11T09:46:52Z"}
+	if q := conditionLine(u); strings.Contains(q, "o/r#5") || strings.Contains(q, "2026-07-11T") {
+		t.Errorf("cleanQuestion fallback leaked: %q", q)
+	}
+}
+
+func TestPayoutLine(t *testing.T) {
+	// One-sided pool: warns, shows payout, never a bare "100%".
+	one := sampleDetail("merge-by", ledger.StateOpen, []string{"yes", "no"},
+		map[string]ledger.USDC{"yes": 5_000_000}, nil)
+	got := payoutLine(one)
+	if !strings.Contains(got, "pays") || !strings.Contains(got, "one side") {
+		t.Errorf("one-sided payout should show payout + warning: %q", got)
+	}
+	if strings.Contains(got, "100%") {
+		t.Errorf("payout line must not show a bare percentage: %q", got)
+	}
+	// Two-sided: no warning.
+	two := sampleDetail("merge-by", ledger.StateOpen, []string{"yes", "no"},
+		map[string]ledger.USDC{"yes": 30_000_000, "no": 20_000_000}, nil)
+	if strings.Contains(payoutLine(two), "one side") {
+		t.Errorf("two-sided payout should not warn: %q", payoutLine(two))
+	}
+}
+
+func TestSlackDate(t *testing.T) {
+	got := slackDate(time.Date(2026, 7, 11, 9, 46, 0, 0, time.UTC))
+	if !strings.HasPrefix(got, "<!date^") || !strings.Contains(got, "{date_short_pretty}") || !strings.Contains(got, "|") {
+		t.Errorf("slackDate malformed: %q", got)
+	}
+}
 
 func sampleDetail(kind, state string, outcomes []string, pools, mine map[string]ledger.USDC) market.Detail {
 	var pool ledger.USDC
