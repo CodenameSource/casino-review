@@ -36,6 +36,7 @@ type Config struct {
 
 	OracleEnabled      bool          // run the resolution oracle in core (auto-settle markets on merge/findings/expiry)
 	OraclePollInterval time.Duration // how often the oracle scans for resolvable markets
+	OracleClosedGrace  time.Duration // how long a PR must stay closed-without-merge before a bounty on it is voided (survives reopen→merge)
 }
 
 // RepoSlug returns "owner/repo" for the monitored repo.
@@ -121,6 +122,9 @@ func Load() (*Config, error) {
 	c.OracleEnabled = env("ORACLE_ENABLED", "true") == "true"
 	if c.OraclePollInterval, err = time.ParseDuration(env("ORACLE_POLL_INTERVAL", "60s")); err != nil {
 		return nil, fmt.Errorf("invalid ORACLE_POLL_INTERVAL: %w", err)
+	}
+	if c.OracleClosedGrace, err = time.ParseDuration(env("ORACLE_CLOSED_GRACE", "24h")); err != nil {
+		return nil, fmt.Errorf("invalid ORACLE_CLOSED_GRACE: %w", err)
 	}
 
 	if c.Token == "" {

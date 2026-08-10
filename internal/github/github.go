@@ -145,6 +145,7 @@ type PullStatus struct {
 	State    string     `json:"state"` // "open" | "closed"
 	Merged   bool       `json:"merged"`
 	MergedAt *time.Time `json:"merged_at"`
+	ClosedAt *time.Time `json:"closed_at"` // set when closed (merged or not); nil while open
 	Title    string     `json:"title"`
 	User     struct {
 		Login string `json:"login"`

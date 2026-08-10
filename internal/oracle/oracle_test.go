@@ -58,7 +58,7 @@ func openTestStore(t *testing.T) *store.Store {
 // collide via the one-live-market-per-context index) with an injectable PR source.
 func testOracle(t *testing.T, gh *fakePR) (*Oracle, *ledger.Ledger, *store.Store, *config.Config) {
 	st := openTestStore(t)
-	cfg := &config.Config{Owner: "acme", Repo: fmt.Sprintf("widget-%d", time.Now().UnixNano())}
+	cfg := &config.Config{Owner: "acme", Repo: fmt.Sprintf("widget-%d", time.Now().UnixNano()), OracleClosedGrace: time.Hour}
 	led := ledger.New(st)
 	tel := telemetry.New()
 	t.Cleanup(tel.Close)
@@ -155,6 +155,39 @@ func TestOracleBountyEmptyAuthorSkips(t *testing.T) {
 	untouched(t, acts, m.ID, "empty author")
 	if s := state(t, led, m.ID); s != ledger.StateOpen {
 		t.Fatalf("empty-author bounty should stay OPEN, got %s", s)
+	}
+}
+
+// A bounty on a PR closed WITHOUT merging is voided (funders refunded) — but
+// only after the close-grace window, so a reopen→merge isn't refunded early.
+func TestOracleBountyClosedVoids(t *testing.T) {
+	gh := newFakePR()
+	o, led, _, cfg := testOracle(t, gh) // grace = 1h
+	ctx := context.Background()
+	pr := 251
+	m, err := led.FindOrCreateBounty(ctx, ref(cfg, pr), "q", "cli:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	led.PlacePosition(ctx, m.ID, "slack:A", "merged", 10_000_000)
+
+	// Just closed → within grace → left OPEN in case it reopens.
+	recent := time.Now().Add(-time.Minute)
+	gh.m[pr] = &github.PullStatus{Number: pr, State: "closed", Merged: false, ClosedAt: &recent}
+	acts, _ := o.Once(ctx, true)
+	untouched(t, acts, m.ID, "closed within grace")
+	if s := state(t, led, m.ID); s != ledger.StateOpen {
+		t.Fatalf("within grace should stay OPEN, got %s", s)
+	}
+
+	// Closed long enough ago → void + refund.
+	old := time.Now().Add(-2 * time.Hour)
+	gh.m[pr] = &github.PullStatus{Number: pr, State: "closed", Merged: false, ClosedAt: &old}
+	if _, err := o.Once(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if s := state(t, led, m.ID); s != ledger.StateVoided {
+		t.Fatalf("past grace should VOID, got %s", s)
 	}
 }
 

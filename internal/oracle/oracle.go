@@ -109,11 +109,26 @@ func (o *Oracle) decide(ctx context.Context, m ledger.Market, now time.Time, cac
 	base := Action{MarketID: m.ID, Kind: m.Kind, ContextRef: m.ContextRef}
 	switch m.Kind {
 	case "bounty":
+		ps, ok := o.prStatus(ctx, m, cache, failed)
+		if !ok {
+			break // can't observe (ext:/foreign/GitHub error) — leave it
+		}
 		// Pays the PR author immediately on merge (challenge window 0). A merged
 		// PR with no resolvable author (deleted account) is left for manual
 		// settling rather than paid to an unclaimable "github:" payee.
-		if ps, ok := o.prStatus(ctx, m, cache, failed); ok && ps.Merged && ps.User.Login != "" {
-			base.Op, base.Outcome, base.Solver = "resolve", "merged", "github:"+ps.User.Login
+		if ps.Merged {
+			if ps.User.Login != "" {
+				base.Op, base.Outcome, base.Solver = "resolve", "merged", "github:"+ps.User.Login
+				return base, true
+			}
+			break
+		}
+		// Closed without merging → the work was rejected/abandoned; nobody to
+		// pay. Void so funders get refunded rather than locked forever — but only
+		// after it's stayed closed past the grace window, so a close→reopen→merge
+		// doesn't refund prematurely.
+		if ps.State == "closed" && ps.ClosedAt != nil && now.Sub(*ps.ClosedAt) > o.cfg.OracleClosedGrace {
+			base.Op, base.Reason = "void", "PR closed without merging"
 			return base, true
 		}
 
