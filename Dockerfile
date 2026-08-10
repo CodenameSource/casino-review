@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # One image, all binaries, compiled ONCE. The three services (core, runner,
 # slackbot) previously each ran their own `go build` — three cold compiles of
 # the same code, the most memory-hungry step, three times over. Building every
@@ -11,11 +12,16 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-# -ldflags "-s -w" strips debug info: smaller binaries and a lighter link step
-# (the memory-hungry phase that OOM-kills the compiler on tiny droplets).
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ ./cmd/core ./cmd/runner ./cmd/slackbot ./cmd/casino
+# Cache mounts persist Go's module + build caches across builds (BuildKit), so a
+# repeat build only recompiles the packages that changed — turning a full cold
+# compile (10-15 min on a swap-thrashing 1 GB droplet) into ~1-2 min. -ldflags
+# "-s -w" strips debug info: smaller binaries and a lighter link step (the
+# memory-hungry phase that OOM-kills the compiler on tiny droplets).
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/ ./cmd/core ./cmd/runner ./cmd/slackbot ./cmd/casino
 
 FROM node:20-alpine
 RUN apk add --no-cache ca-certificates tzdata git && \
