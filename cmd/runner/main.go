@@ -74,7 +74,7 @@ func main() {
 		log.Fatalf("build addon: %v", err)
 	}
 	if addon != nil {
-		log.Printf("bonus addon %q armed at %.0f%% chance", addon.Engine.Name(), addon.Chance*100)
+		log.Printf("bonus addon %q armed (runs every spin)", addon.Engine.Name())
 	}
 
 	spinner := &spin.Spinner{GH: gh, Assets: ghAssets, Branch: cfg.AssetsBranch}

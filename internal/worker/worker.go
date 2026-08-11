@@ -132,18 +132,13 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 	chosen := w.sel.Choose(selCtx, r)
 	engine := w.engines[w.names[chosen]]
 
-	// The bonus (addon) roll is a Bernoulli assignment: rolled BEFORE the GIF
-	// renders (so the animation matches reality) and logged with its chance
-	// (the propensity — without it the bonus arm isn't analyzable).
+	// The static addon (bonus round) runs on every spin when configured — no
+	// longer a random roll. Labeled BEFORE the GIF renders so the animation
+	// matches reality.
 	bonusLabel := ""
-	var bonusChance float64
-	bonusHit := false
-	if w.addon != nil {
-		bonusChance = w.addon.Chance
-		bonusHit = r.Float64() < w.addon.Chance
-		if bonusHit {
-			bonusLabel = w.addon.Engine.Name()
-		}
+	bonusHit := w.addon != nil
+	if bonusHit {
+		bonusLabel = w.addon.Engine.Name()
 	}
 
 	// Record the assignment BEFORE the outcome exists — RCT hygiene.
@@ -153,7 +148,7 @@ func (w *Worker) spinAndReview(ctx context.Context, job *store.Job) error {
 			"job_id": job.ID, "pool": w.names, "chosen": engine.Name(),
 			"chosen_index": chosen, "selector": w.sel.Name(),
 			"prev_index": selCtx.PreviousIndex, "prev_had_findings": selCtx.PreviousHadFindings,
-			"addon": addonName(w.addon), "addon_chance": bonusChance, "addon_hit": bonusHit,
+			"addon": addonName(w.addon), "addon_ran": bonusHit,
 		},
 	}); err != nil {
 		log.Printf("emit spin.assigned: %v", err)

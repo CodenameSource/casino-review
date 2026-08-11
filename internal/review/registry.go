@@ -29,11 +29,10 @@ type AnalyzerStep struct {
 }
 
 // AddonSpec is the bonus reviewer: it is NOT on the reel. After the reel picks
-// a winner, the addon fires with probability Chance (1.0 = permanent) and runs
-// every analyzer step over one checkout, posting one merged findings comment.
+// a winner, the addon runs on every spin — every analyzer step over one
+// checkout, posting one merged findings comment.
 type AddonSpec struct {
 	Name      string         `json:"name"`
-	Chance    float64        `json:"chance"` // 0..1
 	Analyzers []AnalyzerStep `json:"analyzers"`
 }
 
@@ -156,9 +155,6 @@ func (r *Registry) validate(trigger string) error {
 		}
 		if trigger != "" && "/"+a.Name == trigger {
 			return fmt.Errorf("addon %q collides with the trigger %q", a.Name, trigger)
-		}
-		if a.Chance < 0 || a.Chance > 1 {
-			return fmt.Errorf("addon %q: chance must be within [0,1], got %v", a.Name, a.Chance)
 		}
 		if len(a.Analyzers) == 0 {
 			return fmt.Errorf("addon %q: at least one analyzer step is required", a.Name)

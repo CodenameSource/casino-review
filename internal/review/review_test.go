@@ -87,15 +87,14 @@ func TestLoadRegistryAddon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Addon == nil || r.Addon.Chance != 0.25 || len(r.Addon.Analyzers) != 2 {
+	if r.Addon == nil || len(r.Addon.Analyzers) != 2 {
 		t.Fatalf("addon = %+v", r.Addon)
 	}
 
 	for name, content := range map[string]string{
-		"bad-chance":   `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"s","chance":1.5,"analyzers":[{"cmd":["x"]}]}}`,
-		"no-steps":     `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"s","chance":0.5,"analyzers":[]}}`,
-		"dup-name":     `{"reviews":[{"name":"s","engine":"dispatch"}],"addon":{"name":"s","chance":0.5,"analyzers":[{"cmd":["x"]}]}}`,
-		"trigger-name": `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"casino-review","chance":0.5,"analyzers":[{"cmd":["x"]}]}}`,
+		"no-steps":     `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"s","analyzers":[]}}`,
+		"dup-name":     `{"reviews":[{"name":"s","engine":"dispatch"}],"addon":{"name":"s","analyzers":[{"cmd":["x"]}]}}`,
+		"trigger-name": `{"reviews":[{"name":"a","engine":"dispatch"}],"addon":{"name":"casino-review","analyzers":[{"cmd":["x"]}]}}`,
 	} {
 		p := filepath.Join(dir, name+".json")
 		os.WriteFile(p, []byte(content), 0o644)

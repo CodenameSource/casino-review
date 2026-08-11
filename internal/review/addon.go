@@ -12,12 +12,10 @@ import (
 	"casino-review/internal/templates"
 )
 
-// Addon is the bonus reviewer: an all-in-one static pass that fires with
-// probability Chance after the reel's winner is chosen. It is not a reel
-// entry; the worker rolls for it per spin.
+// Addon is the bonus reviewer: an all-in-one static pass that runs on every
+// spin, after the reel's winner is chosen. It is not a reel entry.
 type Addon struct {
 	Engine Engine
-	Chance float64
 }
 
 // BuildAddon constructs the addon engine from its spec.
@@ -39,7 +37,6 @@ func BuildAddon(s *AddonSpec, deps Deps) (*Addon, error) {
 	}
 	return &Addon{
 		Engine: &addonEngine{name: s.Name, steps: steps, checkouts: deps.Checkouts, gh: deps.GH, dryRun: deps.DryRun},
-		Chance: s.Chance,
 	}, nil
 }
 
