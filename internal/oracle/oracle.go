@@ -157,16 +157,29 @@ func (o *Oracle) decide(ctx context.Context, m ledger.Market, now time.Time, cac
 		}
 
 	case "findings-count":
-		if n, ok := o.prNumber(m); ok {
-			count, has, err := o.st.FindingsForPR(ctx, o.cfg.RepoSlug(), n)
-			if err != nil {
-				log.Printf("oracle: findings for %s: %v", m.ContextRef, err)
-			} else if has {
-				if bucket, ok := market.FindingsBucket(count, m.Outcomes); ok {
-					base.Op, base.Outcome = "resolve", bucket
-					return base, true
-				}
+		n, ok := o.prNumber(m)
+		if !ok {
+			break // not an observable PR context — leave for manual
+		}
+		count, has, err := o.st.FindingsForPR(ctx, o.cfg.RepoSlug(), n)
+		if err != nil {
+			log.Printf("oracle: findings for %s: %v", m.ContextRef, err)
+			break
+		}
+		if has {
+			if bucket, ok := market.FindingsBucket(count, m.Outcomes); ok {
+				base.Op, base.Outcome = "resolve", bucket
+				return base, true
 			}
+			break // findings recorded but no bucket matches — leave for manual
+		}
+		// No review has settled this market. If the PR has since closed (merged
+		// or not) and stayed closed past the grace, no review will run for it →
+		// void so stakes refund rather than lock forever.
+		if ps, ok := o.prStatus(ctx, m, cache, failed); ok &&
+			ps.State == "closed" && ps.ClosedAt != nil && now.Sub(*ps.ClosedAt) > o.cfg.OracleClosedGrace {
+			base.Op, base.Reason = "void", "PR closed with no review to settle findings"
+			return base, true
 		}
 
 	default:

@@ -273,6 +273,42 @@ func TestOracleMergeByUnobservableVoids(t *testing.T) {
 	}
 }
 
+// A findings-count market whose PR closes with no review to settle it is voided
+// (refunded) after the grace — otherwise it locks funders' stakes forever.
+func TestOracleFindingsClosedNoReviewVoids(t *testing.T) {
+	gh := newFakePR()
+	o, led, _, cfg := testOracle(t, gh) // grace = 1h
+	ctx := context.Background()
+	pr := 261
+	m, err := led.CreateMarket(ctx, ledger.Market{Kind: "findings-count", ContextRef: ref(cfg, pr),
+		Question: "q", Outcomes: []string{"0", "1-2", "3-5", "6+"}, CreatedBy: "cli:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	led.PlacePosition(ctx, m.ID, "slack:A", "0", 5_000_000)
+
+	// PR open, no review → nothing to do.
+	if acts, _ := o.Once(ctx, true); len(acts) != 0 {
+		t.Fatalf("open PR, no review → no-op, got %+v", acts)
+	}
+	// Just closed, no review → within grace → stays OPEN.
+	recent := time.Now().Add(-time.Minute)
+	gh.m[pr] = &github.PullStatus{Number: pr, State: "closed", Merged: false, ClosedAt: &recent}
+	o.Once(ctx, true)
+	if s := state(t, led, m.ID); s != ledger.StateOpen {
+		t.Fatalf("within grace should stay OPEN, got %s", s)
+	}
+	// Closed past grace, still no review → void.
+	old := time.Now().Add(-2 * time.Hour)
+	gh.m[pr] = &github.PullStatus{Number: pr, State: "closed", Merged: false, ClosedAt: &old}
+	if _, err := o.Once(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if s := state(t, led, m.ID); s != ledger.StateVoided {
+		t.Fatalf("closed-with-no-review past grace should VOID, got %s", s)
+	}
+}
+
 func TestOracleFindingsCount(t *testing.T) {
 	gh := newFakePR()
 	o, led, st, cfg := testOracle(t, gh)
