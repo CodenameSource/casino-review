@@ -11,7 +11,7 @@ func TestParse(t *testing.T) {
 		want Command
 		err  bool
 	}{
-		{in: "", want: Command{Name: "help"}},
+		{in: "", want: Command{Name: "welcome"}},
 		{in: "help", want: Command{Name: "help"}},
 		{in: "board", want: Command{Name: "board"}},
 		{in: "me", want: Command{Name: "me"}},

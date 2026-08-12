@@ -38,7 +38,7 @@ var aliases = map[string]string{
 func Parse(text string) (Command, error) {
 	f := strings.Fields(text)
 	if len(f) == 0 {
-		return Command{Name: "help"}, nil
+		return Command{Name: "welcome"}, nil // bare /casino → buttons-only panel
 	}
 	cmd := Command{Name: strings.ToLower(f[0]), Args: map[string]string{}}
 	if canon, ok := aliases[cmd.Name]; ok {
@@ -72,7 +72,7 @@ func Parse(text string) (Command, error) {
 	}
 
 	switch cmd.Name {
-	case "help", "board", "me", "prs", "balance":
+	case "welcome", "help", "board", "me", "prs", "balance":
 		return cmd, nil
 
 	case "show":

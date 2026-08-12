@@ -645,8 +645,8 @@ func linkModal() slack.ModalViewRequest {
 	}
 }
 
-// welcomeBlocks is the friendly `/casino help` panel: buttons first, command
-// reference below.
+// welcomeBlocks is the default panel (bare `/casino`): just the intro + action
+// buttons. The full command reference lives behind `/casino help`.
 func welcomeBlocks(linked bool) []slack.Block {
 	bar := []slack.BlockElement{
 		slack.NewButtonBlockElement(actBrowse, "help", plainT("📋 Board")),
@@ -656,11 +656,17 @@ func welcomeBlocks(linked bool) []slack.Block {
 		bar = append(bar, slack.NewButtonBlockElement(actLink, "help", plainT("🔗 Link GitHub")))
 	}
 	return []slack.Block{
-		slack.NewSectionBlock(mrkdwn("🎰 *Welcome to the Casino* — stake USDC on what happens to pull requests.\nTap a button, or open the app's *Home* tab for your dashboard."), nil, nil),
+		slack.NewSectionBlock(mrkdwn("🎰 *Welcome to the Casino* — stake USDC on what happens to pull requests.\nTap a button, or open the app's *Home* tab for your dashboard.  `/casino help` lists every command."), nil, nil),
 		slack.NewActionBlock("welcome_bar", bar...),
-		slack.NewDividerBlock(),
-		slack.NewSectionBlock(mrkdwn(helpText), nil, nil),
 	}
+}
+
+// helpBlocks is the `/casino help` panel: the buttons plus the full command
+// reference.
+func helpBlocks(linked bool) []slack.Block {
+	return append(welcomeBlocks(linked),
+		slack.NewDividerBlock(),
+		slack.NewSectionBlock(mrkdwn(helpText), nil, nil))
 }
 
 // --- App Home ---

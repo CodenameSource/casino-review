@@ -206,6 +206,11 @@ func TestBlockBuilders(t *testing.T) {
 	if len(welcomeBlocks(true)) == 0 || len(welcomeBlocks(false)) == 0 {
 		t.Fatal("welcome blocks empty")
 	}
+	// help includes the full reference, so it's strictly longer than the bare
+	// welcome (buttons only).
+	if len(helpBlocks(false)) <= len(welcomeBlocks(false)) {
+		t.Fatal("helpBlocks should add the command reference on top of welcome")
+	}
 	if len(meBlocks(nil, "")) == 0 {
 		t.Fatal("empty me blocks should still render")
 	}

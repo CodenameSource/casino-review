@@ -201,9 +201,13 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 	}
 
 	switch cmd.Name {
-	case "help":
+	case "welcome":
 		login, _ := b.st.GithubLogin(ctx, sc.UserID)
 		return reply{blocks: welcomeBlocks(login != ""), ephemeral: true}
+
+	case "help":
+		login, _ := b.st.GithubLogin(ctx, sc.UserID)
+		return reply{blocks: helpBlocks(login != ""), ephemeral: true}
 
 	case "board":
 		ds, err := b.svc.BoardDetails(ctx, 15)
