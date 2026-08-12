@@ -200,13 +200,15 @@ func (s *Service) Get(ctx context.Context, id int64) (ledger.Market, ledger.USDC
 }
 
 // Detail is everything needed to render one market: the market, its total and
-// per-outcome pools, backer count, and the caller's own stake per outcome.
+// per-outcome pools, backer count, the caller's own stake per outcome, and —
+// once settled — the payouts (who won), since the live pools go empty on resolve.
 type Detail struct {
 	Market       ledger.Market
 	Pool         ledger.USDC
 	Backers      int
 	OutcomePools map[string]ledger.USDC
 	MyStake      map[string]ledger.USDC
+	Payouts      []ledger.Payout // populated for RESOLVED markets
 }
 
 func (s *Service) Detail(ctx context.Context, id int64, participant string) (Detail, error) {
@@ -226,7 +228,15 @@ func (s *Service) Detail(ctx context.Context, id int64, participant string) (Det
 	if err != nil {
 		return Detail{}, err
 	}
-	return Detail{Market: m, Pool: pool, Backers: backers, OutcomePools: pools, MyStake: mine}, nil
+	d := Detail{Market: m, Pool: pool, Backers: backers, OutcomePools: pools, MyStake: mine}
+	// A settled market's live pools/backers are empty (positions are PAID/SPENT),
+	// so carry the payouts to render the actual result instead.
+	if m.State == ledger.StateResolved {
+		if d.Payouts, err = s.led.MarketPayouts(ctx, id); err != nil {
+			return Detail{}, err
+		}
+	}
+	return d, nil
 }
 
 // MyPositions lists a participant's active stakes across all markets.

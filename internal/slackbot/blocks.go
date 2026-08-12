@@ -331,6 +331,12 @@ func marketDetailBlocks(d market.Detail) []slack.Block {
 	now := time.Now()
 	id := strconv.FormatInt(m.ID, 10)
 
+	// A settled market's live pools/odds are empty (positions are settled), so
+	// show the RESULT + who was paid instead of a misleading "$0 · no takers".
+	if m.State == ledger.StateResolved || m.State == ledger.StateVoided {
+		return settledDetailBlocks(d)
+	}
+
 	blocks := []slack.Block{
 		slack.NewSectionBlock(mrkdwn(conditionLine(m)+"   `"+m.State+"`"), nil, nil),
 		slack.NewSectionBlock(nil, []*slack.TextBlockObject{
@@ -379,6 +385,38 @@ func marketDetailBlocks(d market.Detail) []slack.Block {
 		blocks = append(blocks, slack.NewActionBlock("detail_"+id, els...))
 	}
 	return blocks
+}
+
+// settledDetailBlocks is the deep view for a RESOLVED or VOIDED market: the
+// outcome and who was paid, since the live pool is empty once positions settle.
+func settledDetailBlocks(d market.Detail) []slack.Block {
+	m := d.Market
+	id := strconv.FormatInt(m.ID, 10)
+
+	if m.State == ledger.StateVoided {
+		return []slack.Block{
+			slack.NewSectionBlock(mrkdwn(conditionLine(m)+"   🚫 *voided* — all stakes refunded"), nil, nil),
+		}
+	}
+
+	outcome, _ := m.Resolution["outcome"].(string)
+	blocks := []slack.Block{
+		slack.NewSectionBlock(mrkdwn(conditionLine(m)+fmt.Sprintf("   🏁 resolved: *%s*", outcome)), nil, nil),
+	}
+	if len(d.Payouts) == 0 {
+		return append(blocks, slack.NewContextBlock("nopay_"+id,
+			mrkdwn("_No stakes were placed — nothing was paid out._")))
+	}
+	var sb strings.Builder
+	var total ledger.USDC
+	sb.WriteString("*Winners paid*\n")
+	for _, p := range d.Payouts {
+		sb.WriteString(fmt.Sprintf("• %s — *%s*  _(%s)_\n", renderPayee(p.Payee), p.Amount, p.Reason))
+		total += p.Amount
+	}
+	blocks = append(blocks, slack.NewSectionBlock(mrkdwn(sb.String()), nil, nil))
+	return append(blocks, slack.NewContextBlock("tot_"+id,
+		mrkdwn(fmt.Sprintf("Pool of *%s* paid across %d payout(s).", total, len(d.Payouts)))))
 }
 
 func closesField(m ledger.Market, now time.Time) string {

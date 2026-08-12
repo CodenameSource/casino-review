@@ -2,6 +2,28 @@ package ledger
 
 import "context"
 
+// MarketPayouts returns the recorded payouts of a settled market (winners /
+// solver / house dust), largest first — the "who won" of a resolved market.
+func (l *Ledger) MarketPayouts(ctx context.Context, marketID int64) ([]Payout, error) {
+	rows, err := l.st.Pool.Query(ctx,
+		`SELECT payee, amount_usdc, reason FROM payouts WHERE market_id=$1 ORDER BY amount_usdc DESC`, marketID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Payout
+	for rows.Next() {
+		var p Payout
+		var amt int64
+		if err := rows.Scan(&p.Payee, &amt, &p.Reason); err != nil {
+			return nil, err
+		}
+		p.Amount = USDC(amt)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ResolvableMarkets returns every OPEN or LOCKED market — the set the resolution
 // oracle attempts to settle each pass. Resolve is state-guarded, so attempting a
 // market that a concurrent action already moved is a harmless no-op.

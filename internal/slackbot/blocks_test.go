@@ -109,6 +109,15 @@ func TestBlockBuilders(t *testing.T) {
 			map[string]ledger.USDC{"yes": 10_000_000}, nil),
 	}
 
+	// A resolved market shows the result + winners, not the (empty) live pool.
+	resolved := sampleDetail("merge-by", ledger.StateResolved, []string{"yes", "no"}, nil, nil)
+	resolved.Market.Resolution = map[string]any{"outcome": "yes"}
+	resolved.Payouts = []ledger.Payout{{Payee: "slack:U1", Amount: 5_000_000, Reason: "parimutuel-win"}}
+	rb := marketDetailBlocks(resolved)
+	if len(rb) == 0 {
+		t.Fatal("resolved detail empty")
+	}
+
 	if len(boardBlocks(nil)) == 0 {
 		t.Fatal("empty board should still render a block")
 	}
