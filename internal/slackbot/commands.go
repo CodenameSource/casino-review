@@ -30,6 +30,8 @@ var aliases = map[string]string{
 	"cash":    "refund",
 	"mine":    "me",
 	"status":  "prs",
+	"bal":     "balance",
+	"wallet":  "balance",
 }
 
 // Parse turns the slash-command text into a Command. Pure — unit tested.
@@ -70,7 +72,7 @@ func Parse(text string) (Command, error) {
 	}
 
 	switch cmd.Name {
-	case "help", "board", "me", "prs":
+	case "help", "board", "me", "prs", "balance":
 		return cmd, nil
 
 	case "show":
@@ -232,6 +234,7 @@ const helpText = "🎰 *Welcome to the Casino* — stake USDC on what happens to
 	"• `/casino refund #123 merge-by` — ↩️ pull your stake back (while it's open)\n\n" +
 	"_Tip: tap 🎲 *Bet* / 📊 *Details* on the board instead of typing._\n\n" +
 	"*You*\n" +
+	"• `/casino balance` — your USDC balance\n" +
 	"• `/casino link octocat` — link your GitHub login so bounties can pay you\n" +
 	"• `/casino prs` — PRs the casino has reviewed\n\n" +
 	"_Amounts accept `$` and decimals (`$10.50`). Admins settle markets with `lock` · `resolve` · `void`._"

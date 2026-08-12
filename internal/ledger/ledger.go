@@ -36,10 +36,11 @@ const (
 )
 
 var (
-	ErrNotFound   = errors.New("market not found")
-	ErrBadState   = errors.New("market is not in a state that allows this")
-	ErrBadOutcome = errors.New("outcome is not one of the market's outcomes")
-	ErrNoPosition = errors.New("no active position to refund")
+	ErrNotFound          = errors.New("market not found")
+	ErrBadState          = errors.New("market is not in a state that allows this")
+	ErrBadOutcome        = errors.New("outcome is not one of the market's outcomes")
+	ErrNoPosition        = errors.New("no active position to refund")
+	ErrInsufficientFunds = errors.New("insufficient balance")
 )
 
 // Market is the persisted market row.
@@ -67,10 +68,25 @@ type BoardRow struct {
 
 // Ledger owns all money mutations.
 type Ledger struct {
-	st *store.Store
+	st       *store.Store
+	balances bool // when on, betting debits and payouts credit a spendable balance
 }
 
-func New(st *store.Store) *Ledger { return &Ledger{st: st} }
+// Option configures a Ledger.
+type Option func(*Ledger)
+
+// WithBalances turns on real-money accounting: PlacePosition debits the staker's
+// balance (insufficient → ErrInsufficientFunds) and Refund/Void/Resolve credit
+// it. Off (default) = today's notional betting, no balance touched.
+func WithBalances(enabled bool) Option { return func(l *Ledger) { l.balances = enabled } }
+
+func New(st *store.Store, opts ...Option) *Ledger {
+	l := &Ledger{st: st}
+	for _, o := range opts {
+		o(l)
+	}
+	return l
+}
 
 // validOutcomes rejects outcome sets that would corrupt resolution: empties,
 // too many, and case-colliding duplicates ("yes" vs "Yes" resolving apart).
@@ -190,6 +206,14 @@ func (l *Ledger) PlacePosition(ctx context.Context, marketID int64, participant,
 		return 0, fmt.Errorf("%w: %q (have: %v)", ErrBadOutcome, outcome, m.Outcomes)
 	}
 
+	// Real money: the stake is spent from the participant's balance in this same
+	// tx — insufficient funds rolls the whole thing back (no position placed).
+	if l.balances {
+		if err := debitBalance(ctx, tx, participant, amount, "stake"); err != nil {
+			return 0, err
+		}
+	}
+
 	var posID int64
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO positions (market_id, participant, outcome, amount_usdc) VALUES ($1,$2,$3,$4) RETURNING id`,
@@ -232,6 +256,11 @@ func (l *Ledger) Refund(ctx context.Context, marketID int64, participant string)
 	}
 	if total == 0 {
 		return 0, ErrNoPosition
+	}
+	if l.balances {
+		if err := creditBalance(ctx, tx, participant, USDC(total), "refund", ""); err != nil {
+			return 0, err
+		}
 	}
 	if err := telemetry.Emit(ctx, tx, telemetry.Event{
 		Type: "position.refunded", Actor: participant, ContextRef: m.ContextRef,
@@ -345,6 +374,17 @@ func (l *Ledger) Resolve(ctx context.Context, marketID int64, outcome, payoutRul
 		}
 	}
 
+	// Real money: every payee's balance is credited — winners (parimutuel-win),
+	// the bounty solver, dust to house, and the no-winners refunds. What was
+	// debited on staking flows back out here; the pool is conserved.
+	if l.balances {
+		for _, p := range payouts {
+			if err := creditBalance(ctx, tx, p.Payee, p.Amount, p.Reason, ""); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	resolution := map[string]any{"outcome": outcome, "pools": pools, "evidence": evidence}
 	if solver != "" {
 		resolution["solver"] = solver
@@ -395,6 +435,11 @@ func (l *Ledger) Void(ctx context.Context, marketID int64, actor, reason string)
 	var refunds []Payout
 	for _, s := range stakes {
 		refunds = append(refunds, Payout{Payee: s.Participant, Amount: s.Amount, Reason: "refund"})
+		if l.balances {
+			if err := creditBalance(ctx, tx, s.Participant, s.Amount, "void-refund", ""); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := telemetry.Emit(ctx, tx, telemetry.Event{
 		Type: "market.voided", Actor: actor, ContextRef: m.ContextRef,

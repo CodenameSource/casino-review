@@ -2,6 +2,7 @@ package slackbot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -177,7 +178,13 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		return reply{text: "⚠️ " + err.Error(), ephemeral: true}
 	}
 	emsg := func(s string) reply { return reply{text: s, ephemeral: true} }
-	errf := func(err error) reply { return emsg("⚠️ " + err.Error()) }
+	errf := func(err error) reply {
+		if errors.Is(err, ledger.ErrInsufficientFunds) {
+			bal, _ := b.svc.Balance(ctx, participant)
+			return emsg(fmt.Sprintf("💸 That's more than your balance of *%s*. Top up with `/casino deposit`.", bal))
+		}
+		return emsg("⚠️ " + err.Error())
+	}
 	pub := func(s string) reply { return reply{text: s} }
 
 	// resolveID turns a context+kind command into a market id, or uses the
@@ -234,6 +241,17 @@ func (b *Bot) execute(ctx context.Context, sc slack.SlashCommand, participant st
 		}
 		pending, _ := b.st.PendingSpins(ctx)
 		return emsg(renderPRs(b.cfg.RepoSlug(), prs, pending))
+
+	case "balance":
+		bal, err := b.svc.Balance(ctx, participant)
+		if err != nil {
+			return errf(err)
+		}
+		msg := fmt.Sprintf("💰 Your balance: *%s*", bal)
+		if !b.svc.BalancesOn() {
+			msg += "\n_(betting is notional for now — balances aren't enforced yet)_"
+		}
+		return emsg(msg)
 
 	case "fund":
 		amt, err := ledger.ParseUSDC(cmd.Amount)
@@ -655,7 +673,8 @@ func (b *Bot) publishHome(ctx context.Context, userID string) {
 		log.Printf("slackbot: home board: %v", err)
 	}
 	login, _ := b.st.GithubLogin(ctx, userID)
-	view := slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: slack.Blocks{BlockSet: homeBlocks(login, positions, board)}}
+	bal, _ := b.svc.Balance(ctx, participant)
+	view := slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: slack.Blocks{BlockSet: homeBlocks(login, bal, b.svc.BalancesOn(), positions, board)}}
 	if _, err := b.api.PublishView(userID, view, ""); err != nil {
 		log.Printf("slackbot: publish home: %v", err)
 	}

@@ -667,9 +667,13 @@ func welcomeBlocks(linked bool) []slack.Block {
 
 // homeBlocks is the per-user Home dashboard: link banner, action bar, your open
 // bets (tappable), and the live board.
-func homeBlocks(githubLogin string, positions []ledger.PositionView, board []market.Detail) []slack.Block {
+func homeBlocks(githubLogin string, bal ledger.USDC, balancesOn bool, positions []ledger.PositionView, board []market.Detail) []slack.Block {
+	header := "🎰 *Your Casino*"
+	if balancesOn {
+		header += fmt.Sprintf("      💰 Balance: *%s*", bal)
+	}
 	blocks := []slack.Block{
-		slack.NewSectionBlock(mrkdwn("🎰 *Your Casino*"), nil, nil),
+		slack.NewSectionBlock(mrkdwn(header), nil, nil),
 	}
 	bar := []slack.BlockElement{
 		slack.NewButtonBlockElement(actNewMarket, "home", plainT("＋ New market")).WithStyle(slack.StylePrimary),

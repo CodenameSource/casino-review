@@ -68,7 +68,7 @@ func runMarket(cfg *config.Config, args []string) {
 	}
 	tel := telemetry.New()
 	defer tel.Close()
-	svc := market.NewService(cfg, ledger.New(st), tel)
+	svc := market.NewService(cfg, ledger.New(st, ledger.WithBalances(cfg.BalancesEnabled)), tel)
 
 	sub, rest := plain[0], plain[1:]
 	// address resolves the leading market address in rest: context form

@@ -37,6 +37,8 @@ type Config struct {
 	OracleEnabled      bool          // run the resolution oracle in core (auto-settle markets on merge/findings/expiry)
 	OraclePollInterval time.Duration // how often the oracle scans for resolvable markets
 	OracleClosedGrace  time.Duration // how long a PR must stay closed-without-merge before a bounty on it is voided (survives reopen→merge)
+
+	BalancesEnabled bool // real money: betting debits a spendable USDC balance; winnings/refunds/deposits credit it (off = notional)
 }
 
 // RepoSlug returns "owner/repo" for the monitored repo.
@@ -126,6 +128,7 @@ func Load() (*Config, error) {
 	if c.OracleClosedGrace, err = time.ParseDuration(env("ORACLE_CLOSED_GRACE", "24h")); err != nil {
 		return nil, fmt.Errorf("invalid ORACLE_CLOSED_GRACE: %w", err)
 	}
+	c.BalancesEnabled = env("CASINO_BALANCES_ENABLED", "false") == "true"
 
 	if c.Token == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN is required")

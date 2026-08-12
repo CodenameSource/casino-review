@@ -233,3 +233,16 @@ func (s *Service) Detail(ctx context.Context, id int64, participant string) (Det
 func (s *Service) MyPositions(ctx context.Context, participant string) ([]ledger.PositionView, error) {
 	return s.led.ActivePositions(ctx, participant)
 }
+
+// Balance is a participant's spendable USDC balance.
+func (s *Service) Balance(ctx context.Context, participant string) (ledger.USDC, error) {
+	return s.led.Balance(ctx, participant)
+}
+
+// Credit adds funds to a balance (deposit / admin seed).
+func (s *Service) Credit(ctx context.Context, participant string, amount ledger.USDC, reason string) error {
+	return s.led.Credit(ctx, participant, amount, reason)
+}
+
+// BalancesOn reports whether real-money balances are enforced.
+func (s *Service) BalancesOn() bool { return s.cfg.BalancesEnabled }

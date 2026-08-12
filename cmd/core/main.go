@@ -55,8 +55,8 @@ func main() {
 	// Resolution oracle: auto-settles markets on merge/findings/expiry. Its
 	// events flow to Slack via the bot's tailer (via != "slack" is posted).
 	if cfg.OracleEnabled {
-		svc := market.NewService(cfg, ledger.New(st), tel)
-		o := oracle.New(cfg, svc, ledger.New(st), github.New(cfg.Token, cfg.Owner, cfg.Repo), st)
+		svc := market.NewService(cfg, ledger.New(st, ledger.WithBalances(cfg.BalancesEnabled)), tel)
+		o := oracle.New(cfg, svc, ledger.New(st, ledger.WithBalances(cfg.BalancesEnabled)), github.New(cfg.Token, cfg.Owner, cfg.Repo), st)
 		g.Go(func() error { return o.Run(ctx) })
 	} else {
 		log.Printf("core: resolution oracle disabled (ORACLE_ENABLED=false)")

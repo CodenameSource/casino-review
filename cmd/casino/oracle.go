@@ -49,7 +49,7 @@ func runOracle(cfg *config.Config, args []string) {
 	tel := telemetry.New()
 	defer tel.Close()
 
-	led := ledger.New(st)
+	led := ledger.New(st, ledger.WithBalances(cfg.BalancesEnabled))
 	svc := market.NewService(cfg, led, tel)
 	gh := github.New(cfg.Token, cfg.Owner, cfg.Repo)
 	o := oracle.New(cfg, svc, led, gh, st)

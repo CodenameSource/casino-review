@@ -70,6 +70,8 @@ func main() {
 		runMarket(cfg, os.Args[2:])
 	case "oracle":
 		runOracle(cfg, os.Args[2:])
+	case "balance":
+		runBalance(cfg, os.Args[2:])
 	default:
 		usage()
 	}
@@ -148,7 +150,8 @@ func usage() {
   casino market board | show <id> | me [--as id]
   casino market refund <id> | lock <id> | void <id> [reason]
   casino market resolve <id> <outcome> [--solver login] [--as id]
-  casino oracle once [--apply]                        # settle resolvable markets (dry-run unless --apply)`)
+  casino oracle once [--apply]                        # settle resolvable markets (dry-run unless --apply)
+  casino balance <participant> | balance credit <participant> <amount>`)
 	os.Exit(2)
 }
 

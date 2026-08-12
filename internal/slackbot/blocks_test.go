@@ -217,10 +217,10 @@ func TestBlockBuilders(t *testing.T) {
 	if len(meBlocks(positions, "octocat")) == 0 {
 		t.Fatal("me blocks empty")
 	}
-	if len(homeBlocks("", positions, cases)) == 0 || len(homeBlocks("octocat", nil, nil)) == 0 {
+	if len(homeBlocks("", 12_000_000, true, positions, cases)) == 0 || len(homeBlocks("octocat", 0, false, nil, nil)) == 0 {
 		t.Fatal("home blocks empty")
 	}
-	assertActionBlocksValid(t, homeBlocks("", positions, cases))
+	assertActionBlocksValid(t, homeBlocks("", 12_000_000, true, positions, cases))
 }
 
 // assertActionBlocksValid checks Slack's per-actions-block rules: ≤5 elements

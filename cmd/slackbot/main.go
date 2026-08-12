@@ -51,7 +51,7 @@ func main() {
 	tel := telemetry.New()
 	defer tel.Close()
 
-	svc := market.NewService(cfg, ledger.New(st), tel)
+	svc := market.NewService(cfg, ledger.New(st, ledger.WithBalances(cfg.BalancesEnabled)), tel)
 	bot := slackbot.New(cfg, svc, st, tel)
 
 	g, ctx := errgroup.WithContext(ctx)
